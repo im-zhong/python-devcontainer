@@ -215,7 +215,29 @@ formatting (replacing black + isort + flake8) and [`ty`](https://github.com/astr
 for type checking (instead of mypy or pyright). Both run on every commit
 via `pre-commit`.
 
-### Install the git hook (once per clone)
+### Single source of truth for tool versions
+
+`ruff` and `ty` versions live **only** in `pyproject.toml`'s `dev`
+dependency group, pinned exactly by `uv.lock`. The pre-commit hooks shell
+out to `uv run --frozen ruff …` / `uv run --frozen ty …`, so:
+
+- VS Code's Ruff extension (which calls `.venv/bin/ruff`)
+- `uv run pytest`-adjacent invocations (`uv run ruff check`)
+- The pre-commit hook on `git commit`
+- CI's `uv run …` calls
+
+…all use **the exact same binary**. There's no `rev:` to keep in sync, no
+"editor formatted with 0.16, hook reformatted with 0.15" reformat loops.
+
+The trade-off: contributors must `uv sync` before their first commit. The
+devcontainer's `postCreateCommand` does this automatically, so within the
+container it's free. On the host, run `uv sync --all-packages` once
+manually.
+
+### Install the git hook
+
+The devcontainer runs `uv run pre-commit install` automatically on first
+container creation. If you're working on the host, do it once per clone:
 
 ```bash
 uv run pre-commit install
@@ -230,16 +252,31 @@ re-stage and try again.
 ```bash
 uv run pre-commit run --all-files          # check the whole repo
 uv run pre-commit run ruff-format          # one specific hook
-uv run pre-commit autoupdate               # bump hook revs to latest
+```
+
+### Bumping versions
+
+Because the version is locked in `uv.lock`, bumping is a `uv` operation:
+
+```bash
+uv lock --upgrade-package ruff --upgrade-package ty
+uv sync
+uv run pre-commit run --all-files          # confirm hooks still pass
+```
+
+For the generic file-hygiene hooks (whitespace, large files, …) which
+*do* still come from a remote repo, occasionally run:
+
+```bash
+uv run pre-commit autoupdate
 ```
 
 ### First-run cost vs. the cache
 
-The first `pre-commit run` builds isolated environments for each hook
-(downloads ruff, ty, etc. — ~100MB total) under `~/.cache/pre-commit/`.
-That directory is on the `cache` named volume in `docker-compose.yml`,
-so subsequent runs and container rebuilds reuse it — only `.pre-commit-config.yaml`
-edits trigger a re-build of the affected hook env.
+The first `pre-commit run` only needs to build the small `pre-commit-hooks`
+env (~10 MB) — ruff and ty come from `.venv/`, no extra downloads. Hook
+envs live in `~/.cache/pre-commit/`, persisted on the `cache` named
+volume, so container rebuilds reuse them.
 
 ## Cache layout (named volumes)
 

@@ -1,3 +1,18 @@
+# =============================================================================
+# .gitignore for python-devcontainer
+# =============================================================================
+# Most of this file is the standard GitHub Python template (`uv init`
+# scaffolds it). Patterns are kept even when this project doesn't currently
+# use a given tool — the cost of a future-proof line is one comment, the
+# cost of accidentally committing __pypackages__/ is a clean-up PR.
+#
+# Project-specific decisions documented below at:
+#   • [uv.lock]              — section near "# UV" — DO commit it
+#   • [.python-version]      — section near "# pyenv" — DO commit it
+#   • [.vscode/]             — bottom of file — partially share
+#   • [.omc/ / .zac/]        — bottom of file — never commit (per-session)
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -84,45 +99,38 @@ profile_default/
 ipython_config.py
 
 # pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
+#   Decision for THIS repo: COMMIT .python-version. It pins the Python
+#   minor version we develop and CI against, ensuring uv resolves the
+#   same managed interpreter for everyone. The default template comment
+#   below says "ignore for libraries" — we are an application/template,
+#   not a library, so the inverse applies.
 # .python-version
 
 # pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
 # Pipfile.lock
 
 # UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
+#   Decision for THIS repo: COMMIT uv.lock. The lockfile pins exact
+#   transitive versions of every dependency. Without committing it,
+#   `uv sync` on different machines would resolve different versions
+#   and you'd lose reproducibility — which is half the reason to use
+#   a devcontainer in the first place. This is also why Fix-A
+#   pre-commit hooks (calling `uv run --frozen`) work: they trust
+#   uv.lock as the single source of truth.
 # uv.lock
 
 # poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
 # poetry.lock
 # poetry.toml
 
 # pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
 # pdm.lock
 # pdm.toml
 .pdm-python
 .pdm-build/
 
 # pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 # pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
 .pixi/*
 !.pixi/config.toml
 
@@ -150,6 +158,11 @@ activemq-data/
 *.sage.py
 
 # Environments
+#   Decision: ignore .venv/ even though `uv sync` deterministically
+#   recreates it. Reason: shebangs in .venv/bin/* embed the absolute
+#   build path (e.g. /workspaces/python-devcontainer/.venv/bin/python),
+#   so a venv built in the container is broken on the host and vice
+#   versa. Re-creating it on a fresh clone is one `uv sync` command.
 .env
 .envrc
 .venv
@@ -184,24 +197,20 @@ dmypy.json
 cython_debug/
 
 # PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
 # .idea/
 
 # Abstra
-#   Abstra is an AI-powered process automation framework.
-#   Ignore directories containing user credentials, local state, and settings.
-#   Learn more at https://abstra.io/docs
 .abstra/
 
 # Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#   you could uncomment the following to ignore the entire vscode folder
+#   Decision for THIS repo: don't ignore the whole .vscode/ dir, but
+#   selectively share .vscode/extensions.json (recommended extensions)
+#   while ignoring per-user settings.json. The devcontainer's
+#   `customizations.vscode.extensions` block already covers the
+#   ESSENTIAL extensions; .vscode/extensions.json is for nice-to-haves
+#   that don't warrant rebuilding the image.
 # .vscode/
+!.vscode/extensions.json
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
@@ -220,9 +229,10 @@ __marimo__/
 .streamlit/secrets.toml
 
 # --- oh-my-claudecode session artifacts ------------------------------------
+# Decision: never commit. OMC writes per-session state (logs, plan files,
+# research notes) into .omc/ and .zac/. These are personal to a single
+# Claude session, not shared project state. Committing them would mean
+# every PR carries unrelated session diff noise. If the team ever wants
+# shared OMC conventions, that'll be an explicit, separate design.
 .omc/
 .zac/
-
-
-# OMC
-.omc/

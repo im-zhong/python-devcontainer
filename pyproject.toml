@@ -1,51 +1,164 @@
+# =============================================================================
+# Root pyproject.toml — serves TWO roles at once.
+# =============================================================================
+#
+# Role 1: the workspace root (declares which packages are members).
+# Role 2: the main service of the monorepo (its own [project] table).
+#
+# Decision: combine workspace-root and main-service into ONE pyproject,
+# instead of having an empty top-level virtual project that owns members.
+#
+# Considered:
+#   A. Virtual root (pyproject.toml without [project], just [tool.uv.workspace])
+#      and a separate apps/main/ for the service.
+#      → Two more directory levels; users have to know to `cd apps/main`
+#        for the entrypoint. Boilerplate.
+#   B. Root IS the main service AND the workspace root.  ← chosen
+#      → Cleanest for "one main service + a few shared libraries".
+#      → Trade-off: if we ever grow to >1 top-level service, we'll
+#        need to migrate to option A. That's a real refactor, but
+#        well-defined; not worth pre-paying for it now.
 [project]
 name = "python-devcontainer"
 version = "0.0.0"
 description = "Main service — depends on local workspace packages under packages/*."
 readme = "README.md"
 requires-python = ">=3.12"
+
 dependencies = [
-    # Local workspace packages — versions resolved via [tool.uv.sources].
+    # Local workspace packages — they appear in PyPI-style syntax here
+    # because the resolver needs a NAME to look up. The actual source
+    # (workspace path vs PyPI) is overridden by [tool.uv.sources] below.
+    # Versions can be omitted because workspace members always resolve
+    # to whatever is on disk; specifying one would mislead future readers.
     "pdc-core",
 ]
 
-[project.scripts]
-# `uv run python-devcontainer` works once installed.
-python-devcontainer = "python_devcontainer.__main__:main"
-
+# -----------------------------------------------------------------------------
+# Decision: dev tooling lives in [dependency-groups], NOT [project.optional-dependencies]
+# -----------------------------------------------------------------------------
+# PEP 735 dependency groups are uv's preferred way to express "tools that
+# the project's MAINTAINERS need" (lint, format, type-check, test). Why
+# not optional-dependencies?
+#   - optional-dependencies (PEP 621) is meant for END USERS of the package
+#     who want extra features (e.g. `pip install python-devcontainer[redis]`).
+#     Putting `pytest` there would falsely advertise pytest as a feature
+#     of the package's API.
+#   - Dependency groups don't end up in the published wheel's metadata,
+#     so they can't accidentally pollute downstream users' resolutions.
+#   - `uv sync` installs the `dev` group by default; `uv sync --no-dev`
+#     gives you a production-shaped install in one command.
+#
+# Floor versions only (`>=`), no upper bounds:
+#   These are tooling, not runtime deps. The ACTUAL version is pinned by
+#   uv.lock; the floor here just guards against pre-release weirdness.
+#   Upper-bounding tools forces frequent maintenance with no real benefit.
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "ty>=0.0.48", "pre-commit>=4"]
 
-# ---- uv workspace ------------------------------------------------------------
-# The repo root is BOTH the main service and the workspace root. Sub-packages
-# live under packages/* and are picked up by the glob below.
+# =============================================================================
+# uv workspace configuration
+# =============================================================================
+# Decision: workspace via [tool.uv.workspace] members glob, not by listing
+# each package explicitly. The glob means "every directory under packages/
+# that has a pyproject.toml is a member". Adding a new package = creating
+# a directory, no edit here required.
 [tool.uv.workspace]
 members = ["packages/*"]
 
-# Tell uv to resolve `pdc-core` (declared in dependencies) to the workspace
-# member rather than PyPI. Add one entry per local package as you create them.
+# -----------------------------------------------------------------------------
+# Decision: pin internal deps to workspace via [tool.uv.sources].
+# -----------------------------------------------------------------------------
+# Without this block, `pdc-core` in [project.dependencies] would resolve
+# from PyPI and fail (or worse, silently install some squatted package
+# of the same name). Marking it `workspace = true` tells uv:
+#   "This name refers to a member of THIS workspace, not PyPI."
+#
+# When a third internal package is added, append a corresponding line
+# here AND a name reference in [project.dependencies] above. Forgetting
+# either side is the most common mistake — one without the other gives
+# you confusing resolver errors.
 [tool.uv.sources]
 pdc-core = { workspace = true }
 
-# ---- Build backend -----------------------------------------------------------
-# uv_build is uv's first-party build backend. With a [project].name of
-# "python-devcontainer" it auto-discovers src/python_devcontainer/__init__.py
-# (name normalized: dashes → underscores). No [tool.uv.build-backend] block
-# is needed for this layout.
-# docker volume rm python-devcontainer_uv-cache 2>/dev/null
-# https://docs.astral.sh/uv/concepts/build-backend/
+# =============================================================================
+# Build backend
+# =============================================================================
+# Decision: uv_build, NOT hatchling / setuptools / poetry-core / flit.
+#
+# Considered:
+#   - hatchling: the previous default; battle-tested; works fine.
+#     Cost: extra [tool.hatch.build.targets.wheel] block to point at src/
+#     and a separate dependency to install at build time.
+#   - setuptools: legacy; needs setup.cfg or extra [tool.setuptools] config.
+#   - poetry-core: requires Poetry-flavored [tool.poetry] structure;
+#     incompatible with the [project] table we already have.
+#   - uv_build: Astral's first-party backend, ships in lockstep with uv.
+#     ← chosen
+#
+# Why uv_build wins for THIS project:
+#   - Zero config: with [project].name = "python-devcontainer" it
+#     auto-discovers src/python_devcontainer/__init__.py (name normalized:
+#     dashes → underscores). No [tool.uv.build-backend] block needed.
+#   - Same vendor as the resolver/installer; less version-skew surface.
+#   - Drops the hatchling dependency from the build environment, so
+#     `uv build` is faster (one less wheel to download).
+#
+# When NOT to pick uv_build:
+#   - You have C/Rust extension modules → use maturin or scikit-build.
+#   - You need build hooks / custom file inclusion logic → use hatchling.
+#
+# Pin range `>=0.11,<0.12`: matches the uv minor we develop against.
+# Bump deliberately; uv_build's CLI surface is stable but subtle build-
+# semantics changes between minors are possible.
+# Reference: https://docs.astral.sh/uv/concepts/build-backend/
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
 
-# ---- Tooling -----------------------------------------------------------------
+# =============================================================================
+# Tooling configuration
+# =============================================================================
 [tool.ruff]
+# Decision: 100 cols, NOT 88 (black) or 120 (often seen).
+#   - 88 is black's default, derived from "fits two windows side by side
+#     at 14pt on a 13in MBP". For modern wide screens, 100 is a better
+#     compromise between line density and avoiding awkward wrap of
+#     log/SQL strings.
+#   - 120 reads as a wall of code; pull request diffs scroll horizontally.
 line-length = 100
+
+# target-version informs syntax-aware lint rules and the formatter
+# (e.g. UP012 won't suggest `b""`-style fixes if py < 3.12).
 target-version = "py312"
 
 [tool.ruff.lint]
+# Decision: a curated subset of ruff rules, NOT `select = ["ALL"]`.
+#   - "ALL" auto-enrolls in every new rule ruff ships, including
+#     opinionated ones (D for docstrings, ANN for annotations) that
+#     create noise without pulling weight on a small project.
+#   - Hand-picking communicates intent: each letter is a deliberate
+#     choice, not a "we tolerate everything" signal.
+#
+# Codes:
+#   E    : pycodestyle errors (whitespace, indentation)
+#   F    : pyflakes (undefined names, unused imports)
+#   I    : isort (import ordering) — replaces a separate isort run
+#   UP   : pyupgrade (modernise old syntax for the target Python)
+#   B    : flake8-bugbear (likely-bugs detector, e.g. mutable defaults)
+#   SIM  : flake8-simplify (collapse needlessly nested ifs etc.)
+#
+# Add codes incrementally as the codebase matures. Do NOT add D (docstring
+# rules) until you've decided on a docstring convention; otherwise every
+# undocumented function becomes noise.
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
+# Discover tests in BOTH the main service's tests/ AND each workspace
+# member's tests/. Without `packages/*/tests`, pytest run from the root
+# would silently miss member tests until someone notices.
 testpaths = ["tests", "packages/*/tests"]
+
+# `-ra` shows a short summary of skipped/xfailed/error tests at the end.
+# Without it, `pytest -q` swallows information you almost always want.
 addopts = "-ra"

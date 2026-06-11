@@ -1,45 +1,154 @@
+# =============================================================================
 # pre-commit hooks for python-devcontainer.
+# =============================================================================
 #
-# Local install:
-#   uv run pre-commit install              # set up the git hook
-#   uv run pre-commit run --all-files      # run everything once (warms cache)
+# Hook installation is handled automatically on first container creation
+# by .devcontainer/devcontainer.json's postCreateCommand:
+#   uv run pre-commit install              # writes .git/hooks/pre-commit
+#   uv run pre-commit run --all-files      # one-time check / cache warm
 #
-# Cache lives at ~/.cache/pre-commit/ — persisted via the `cache` named volume
-# in .devcontainer/docker-compose.yml, so rebuilds don't re-create hook envs.
+# -----------------------------------------------------------------------------
+# Decision: split into TWO regimes — local hooks for tools that ALSO run
+# from the editor/CI, remote hooks for everything else.
+# -----------------------------------------------------------------------------
 #
-# Update hook revisions periodically with: `uv run pre-commit autoupdate`
+# The problem with the standard `repo: <github>` + `rev: vX.Y.Z` pattern:
+#   pre-commit creates an isolated environment per hook (under
+#   ~/.cache/pre-commit/) and installs the tool at the rev'd version
+#   into it. Meanwhile, the SAME tool also lives in `.venv/` from
+#   pyproject.toml's [dependency-groups].dev. CI uses .venv/. The editor
+#   uses .venv/. The hook uses ~/.cache/pre-commit/. Three independent
+#   versions of "the same tool", which drift apart over time:
+#     - editor formats with ruff 0.16
+#     - commit hook reformats with ruff 0.15
+#     - CI checks with ruff 0.16 again
+#   We've all lived this. It's bad.
+#
+# Considered fixes:
+#   A. `repo: local` + `entry: uv run --frozen <tool>`. Hook routes through
+#      the .venv/. uv.lock becomes the SINGLE source of version truth.
+#      ← chosen for ruff + ty
+#   B. additional_dependencies + matching rev. Two version strings to
+#      keep aligned, just both in this file. Doesn't actually solve drift.
+#   C. Renovate/Dependabot rules to bump pyproject + this file together.
+#      Mechanically possible, fragile in practice; defer until needed.
+#
+# Trade-off accepted with A: contributors must `uv sync` BEFORE the
+# first `git commit`, otherwise the hook fails with "command not found".
+# In our devcontainer, postCreateCommand handles this automatically; on
+# the host, it's a one-time `uv sync --all-packages` after clone.
+#
+# -----------------------------------------------------------------------------
+# Why generic file-hygiene hooks STAY remote (option A doesn't apply):
+# -----------------------------------------------------------------------------
+#   These hooks (trailing-whitespace, end-of-file-fixer, etc.) have no
+#   Python-side equivalent — there's no editor extension or CI step
+#   running the same code, so there's nothing to drift from. The
+#   isolated env is the only sensible place; pinning by `rev:` makes
+#   the version source explicit and `pre-commit autoupdate` can keep
+#   it fresh.
+#
+# -----------------------------------------------------------------------------
+# Bumping versions:
+# -----------------------------------------------------------------------------
+#   ruff / ty (controlled by uv.lock):
+#     uv lock --upgrade-package ruff --upgrade-package ty
+#     uv sync
+#     uv run pre-commit run --all-files       # confirm green
+#
+#   pre-commit-hooks (controlled by `rev:` below):
+#     uv run pre-commit autoupdate
+#     uv run pre-commit run --all-files       # confirm green
 
 repos:
-  # ---- generic file hygiene ------------------------------------------------
+  # ---- generic file hygiene -------------------------------------------------
+  # Decision: include only the broad-applicability hooks; skip language-
+  # specific ones from pre-commit-hooks (e.g. check-ast for Python — ruff
+  # already catches those).
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      - id: check-added-large-files       # block accidental binary commits
+      # Block accidental >1MB binary commits. 1000KB is a deliberately
+      # generous threshold — small images, sample data, etc. fit. If
+      # this ever blocks a legitimate large file, prefer Git LFS over
+      # raising the limit.
+      - id: check-added-large-files
         args: ["--maxkb=1000"]
-      - id: check-merge-conflict          # left-over conflict markers
-      - id: check-toml                    # syntactically valid TOML
-      - id: check-yaml                    # ditto YAML
-      - id: end-of-file-fixer             # exactly one trailing newline
+
+      # Catch leftover `<<<<<<< HEAD` markers from rebase/merge tools.
+      - id: check-merge-conflict
+
+      # Validate TOML/YAML syntactically — saves a CI round-trip when
+      # someone breaks pyproject.toml.
+      - id: check-toml
+      - id: check-yaml
+
+      # Enforce: exactly one trailing newline; no trailing whitespace.
+      # Both are a no-op when the file is already clean; otherwise the
+      # hook auto-fixes and aborts the commit so you can re-stage.
+      - id: end-of-file-fixer
       - id: trailing-whitespace
+
+      # Normalise CRLF → LF. The bind-mounted workspace can carry
+      # Windows line endings if anyone edits via a host Windows app
+      # without core.autocrlf, and Python interprets shebang lines
+      # with \r in them as "command not found".
       - id: mixed-line-ending
         args: ["--fix=lf"]
 
-  # ---- ruff: lint + format (replaces black + isort + flake8 + ...) --------
-  # Ruff hooks are pinned to a release tag. Versions here float independently
-  # of what `[dependency-groups].dev` installs — pre-commit runs in its own
-  # isolated env, so this rev is the source of truth for hook behaviour.
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.16
+  # ---- ruff + ty: single-source-of-truth via uv.lock -----------------------
+  - repo: local
     hooks:
-      - id: ruff-check                    # the linter
-        args: ["--fix"]
-      - id: ruff-format                   # the formatter
+      # ruff-check: linter (with auto-fix where safe).
+      #
+      # Why `uv run --frozen`:
+      #   `--frozen` makes uv REFUSE to mutate the venv at hook time. If
+      #   pyproject.toml has been edited but `uv sync` hasn't run yet,
+      #   the commit fails LOUDLY ("frozen lockfile is out of date")
+      #   instead of silently auto-syncing — auto-sync at hook time would
+      #   surprise people with a 30-second commit.
+      #
+      # Why `--force-exclude`:
+      #   When pre-commit invokes a tool, it passes explicit filenames
+      #   on the CLI. Most tools' --exclude rules apply ONLY to discovery,
+      #   not to explicit args, so a file you put in [tool.ruff.extend-
+      #   exclude] would still be linted. --force-exclude tells ruff to
+      #   respect its config exclusions even for explicit args.
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check --fix --force-exclude
+        language: system
 
-  # ---- ty: Astral's type checker (in beta — pin tightly) ------------------
-  # We use ty instead of mypy/pyright per project convention. The hook runs
-  # `ty check` on the whole project (pass_filenames: false) because cross-file
-  # diagnostics make per-file checks misleading.
-  - repo: https://github.com/astral-sh/ty-pre-commit
-    rev: v0.0.48
-    hooks:
+        # types_or: only run on Python source / stubs. pyi included
+        # because [tool.ruff] applies to type-stub files too.
+        types_or: [python, pyi]
+
+        # require_serial: ruff is itself parallel internally; running
+        # multiple ruff invocations concurrently from pre-commit just
+        # contends for the same files. Serial is faster.
+        require_serial: true
+
+      # ruff-format: formatter (replaces black + isort).
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      # ty: Astral's type checker (replaces mypy/pyright in this project).
+      #
+      # Decision: pass_filenames=false + always_run=true. ty does WHOLE-
+      # project analysis — changes in b.py can introduce new diagnostics
+      # in a.py. Passing only changed filenames to `ty check` would
+      # silently miss those, giving a false sense of safety. Always
+      # checking the whole project costs a few seconds; ty is fast
+      # enough that this is fine for commit-time.
       - id: ty
+        name: ty
+        entry: uv run --frozen ty check
+        language: system
+        types_or: [python, pyi, jupyter]
+        pass_filenames: false
+        always_run: true
+        require_serial: true

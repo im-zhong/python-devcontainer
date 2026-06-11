@@ -1,10 +1,42 @@
+# =============================================================================
+# pdc-core — shared core utilities for the python-devcontainer monorepo.
+# =============================================================================
+#
+# Decision: a separate workspace member, NOT a sub-package of
+# python_devcontainer.
+#
+# Why split out:
+#   - Re-usability: future workspace members (a worker, a CLI, a second
+#     service) can depend on `pdc-core` without dragging in the main
+#     service's dependencies.
+#   - Boundary discipline: forces you to think about what should be
+#     "shared" vs. "service-specific". Things that go here are tested
+#     in isolation and can be published independently if ever needed.
+#
+# Why named `pdc-core` (with the prefix), not just `core`:
+#   - PyPI namespace hygiene. If we ever publish, `core` is a squatter
+#     magnet and a generic name; `pdc-` makes the project owner clear.
+#   - Internal consistency: every workspace package has a `pdc-` prefix;
+#     greppability and import-name predictability ("pdc-foo" → import
+#     pdc_foo) is worth more than three saved characters.
 [project]
 name = "pdc-core"
 version = "0.0.0"
 description = "Shared core utilities consumed by the main python-devcontainer service."
 requires-python = ">=3.12"
+
+# Decision: dependencies = [] for now, on purpose.
+# A "core" library should have minimal/zero deps so anything in the
+# workspace can depend on it without pulling in surprises. Add deps
+# here only when you've thought about whether they really belong at
+# the bottom of the dependency stack.
 dependencies = []
 
+# Decision: same uv_build version range as the root pyproject.
+# Workspace members use a SHARED build environment, so version-range
+# drift between the root and members would force uv to resolve two
+# different uv_build versions. Keep the lines identical and bump
+# them together.
 [build-system]
-requires = ["uv_build>=0.10,<0.11"]
+requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
