@@ -54,7 +54,14 @@ dependencies = [
 #   uv.lock; the floor here just guards against pre-release weirdness.
 #   Upper-bounding tools forces frequent maintenance with no real benefit.
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6", "ty>=0.0.48", "pre-commit>=4"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "ty>=0.0.48",
+    "pre-commit>=4",
+    "pytest-cov>=7.1.0",
+    "pytest-asyncio>=1.4.0",
+]
 
 # =============================================================================
 # uv workspace configuration
