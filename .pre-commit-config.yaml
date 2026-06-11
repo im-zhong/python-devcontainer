@@ -1,0 +1,45 @@
+# pre-commit hooks for python-devcontainer.
+#
+# Local install:
+#   uv run pre-commit install              # set up the git hook
+#   uv run pre-commit run --all-files      # run everything once (warms cache)
+#
+# Cache lives at ~/.cache/pre-commit/ — persisted via the `cache` named volume
+# in .devcontainer/docker-compose.yml, so rebuilds don't re-create hook envs.
+#
+# Update hook revisions periodically with: `uv run pre-commit autoupdate`
+
+repos:
+  # ---- generic file hygiene ------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files       # block accidental binary commits
+        args: ["--maxkb=1000"]
+      - id: check-merge-conflict          # left-over conflict markers
+      - id: check-toml                    # syntactically valid TOML
+      - id: check-yaml                    # ditto YAML
+      - id: end-of-file-fixer             # exactly one trailing newline
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # ---- ruff: lint + format (replaces black + isort + flake8 + ...) --------
+  # Ruff hooks are pinned to a release tag. Versions here float independently
+  # of what `[dependency-groups].dev` installs — pre-commit runs in its own
+  # isolated env, so this rev is the source of truth for hook behaviour.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      - id: ruff-check                    # the linter
+        args: ["--fix"]
+      - id: ruff-format                   # the formatter
+
+  # ---- ty: Astral's type checker (in beta — pin tightly) ------------------
+  # We use ty instead of mypy/pyright per project convention. The hook runs
+  # `ty check` on the whole project (pass_filenames: false) because cross-file
+  # diagnostics make per-file checks misleading.
+  - repo: https://github.com/astral-sh/ty-pre-commit
+    rev: v0.0.48
+    hooks:
+      - id: ty

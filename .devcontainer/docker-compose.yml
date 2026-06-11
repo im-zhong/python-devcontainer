@@ -1,0 +1,108 @@
+# Compose project for the python-devcontainer monorepo.
+#
+# The `dev` service is what VS Code attaches to. Everything else here is a
+# *sibling service* on the same docker network — dev can reach them by
+# service name (e.g. `redis://redis:6379`).
+#
+# Workflow inside the dev container:
+#
+#   dc ps                       # list this project's services
+#   dc logs -f redis            # follow one service's logs
+#   dc restart redis            # restart it without rebuilding the image
+#   dc --profile data up -d     # start optional profiles (data services)
+#
+# `dc` is an alias for `docker compose`, baked into the dev image. The
+# COMPOSE_FILE / COMPOSE_PROJECT_NAME envs below let `dc` find this file
+# from any CWD inside the dev container.
+
+# Stable project name — without this, compose derives one from the directory
+# name, which breaks if the repo gets cloned to a different folder. The dev
+# container also uses this name to address its siblings.
+name: python-devcontainer
+
+services:
+  # ===========================================================================
+  # dev — the editor-attached container
+  # ===========================================================================
+  dev:
+    build:
+      context: ..
+      dockerfile: dev.Dockerfile
+    command: sleep infinity
+
+    volumes:
+      # Workspace bind-mount. Path must match `workspaceFolder` in
+      # devcontainer.json. `cached` is a macOS-only hint, no-op on Linux/WSL.
+      - ..:/workspaces/python-devcontainer:cached
+
+      # Named volumes — persist across container rebuilds, kept off the
+      # bind-mounted source tree for speed.
+      #
+      # We mount the whole ~/.cache instead of per-tool sub-paths because
+      # most Python tooling defaults to ~/.cache/<tool>/ and adding each new
+      # tool one-by-one is busywork. Today this covers:
+      #   ~/.cache/uv             — uv's wheel / sdist cache
+      #   ~/.cache/pre-commit     — pre-commit's per-hook venvs (often huge)
+      #   ~/.cache/ruff           — ruff's incremental analysis cache
+      #   ~/.cache/ty             — ty's type-checker cache
+      # Future tools (mypy, pyright, pip, pnpm, ...) just work without
+      # touching this file.
+      #
+      # uv also keeps managed Python interpreters and installed tools under
+      # ~/.local/share/uv — that's a separate volume because it's "data",
+      # not "cache" (clearing it forces re-downloading Python).
+      - cache:/home/vscode/.cache
+      - uv-data:/home/vscode/.local/share/uv
+      - vscode-server:/home/vscode/.vscode-server
+
+      # Claude Code passthrough from host. Skills, MCP servers, conversation
+      # history and OMC layer all "just work" inside the container.
+      - ${HOME}/.claude:/home/vscode/.claude
+      - ${HOME}/.claude.json:/home/vscode/.claude.json
+
+      # Git identity (read-only — keep the host config pristine).
+      - ${HOME}/.gitconfig:/home/vscode/.gitconfig:ro
+
+      # Docker-outside-of-Docker: bind-mount host's docker socket so the
+      # docker CLI inside the dev container drives the host's daemon. This
+      # is what makes `dc logs -f redis` from inside dev work.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      # Make `dc ps`, `dc logs`, etc. work from any CWD inside the dev
+      # container without needing -f / --project-name flags.
+      COMPOSE_FILE: /workspaces/python-devcontainer/.devcontainer/docker-compose.yml
+      COMPOSE_PROJECT_NAME: python-devcontainer
+
+  # ===========================================================================
+  # Sibling services
+  # ===========================================================================
+  # Profile-gated so the default `up` (which is what VS Code Reopen-in-Container
+  # runs) starts only `dev`. Opt in with:
+  #   dc --profile data up -d redis
+  # This keeps cold start fast for sessions that don't need the data tier.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["data"]
+    # Expose to the host too — handy for redis-cli or GUI clients on the host.
+    # Inside the dev container, just connect to redis://redis:6379 — no port
+    # forwarding involved (sibling-to-sibling traffic stays on the compose
+    # network).
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  # Add more siblings here as the project grows. Recommended pattern:
+  #   - data services (postgres, redis, kafka): live in compose, profile-gated
+  #   - your own application services: run with `uv run ...` inside `dev` for
+  #     hot reload + debugger; only containerise them for staging-like runs
+
+volumes:
+  cache:
+  uv-data:
+  vscode-server:
+  redis-data:

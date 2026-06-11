@@ -1,0 +1,51 @@
+[project]
+name = "python-devcontainer"
+version = "0.0.0"
+description = "Main service — depends on local workspace packages under packages/*."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Local workspace packages — versions resolved via [tool.uv.sources].
+    "pdc-core",
+]
+
+[project.scripts]
+# `uv run python-devcontainer` works once installed.
+python-devcontainer = "python_devcontainer.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "ty>=0.0.48", "pre-commit>=4"]
+
+# ---- uv workspace ------------------------------------------------------------
+# The repo root is BOTH the main service and the workspace root. Sub-packages
+# live under packages/* and are picked up by the glob below.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# Tell uv to resolve `pdc-core` (declared in dependencies) to the workspace
+# member rather than PyPI. Add one entry per local package as you create them.
+[tool.uv.sources]
+pdc-core = { workspace = true }
+
+# ---- Build backend -----------------------------------------------------------
+# uv_build is uv's first-party build backend. With a [project].name of
+# "python-devcontainer" it auto-discovers src/python_devcontainer/__init__.py
+# (name normalized: dashes → underscores). No [tool.uv.build-backend] block
+# is needed for this layout.
+# docker volume rm python-devcontainer_uv-cache 2>/dev/null
+# https://docs.astral.sh/uv/concepts/build-backend/
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+# ---- Tooling -----------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "packages/*/tests"]
+addopts = "-ra"

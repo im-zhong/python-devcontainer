@@ -1,0 +1,86 @@
+// https://containers.dev/implementors/json_reference/
+//
+// Devcontainer for the python-devcontainer monorepo. "Reopen in Container"
+// from the repo root picks this up automatically; the `dev` service in the
+// sibling docker-compose.yml is the one VS Code attaches to.
+{
+  "name": "python-devcontainer",
+
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "dev",
+
+  // Must match the bind-mount destination in docker-compose.yml.
+  "workspaceFolder": "/workspaces/python-devcontainer",
+
+  // Renumber the in-container `vscode` user (UID 1000 by default) to match
+  // the host user's UID/GID at attach time. Without this, files created
+  // inside the container can end up root-owned on the host.
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+
+  // Sync the entire uv-managed workspace (root project + all packages/*).
+  // Runs once after the container is first created; subsequent attaches
+  // skip it. The resulting `.venv/` lives inside the bind-mount, so the
+  // host can introspect it (handy for host-side IDE plugins) but Python
+  // itself comes from uv's managed interpreter cache, NOT the host's.
+  "postCreateCommand": "uv sync --all-packages",
+
+  // On every attach: align the in-container `docker` group GID with the
+  // bind-mounted /var/run/docker.sock so `docker compose ...` works without
+  // sudo, and mark the bind-mounted repo as a safe git directory. The script
+  // is idempotent and fast (no-op when nothing changes).
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Python toolchain
+        "ms-python.python",
+        "ms-python.debugpy",
+        "ms-python.vscode-pylance",
+        "ms-python.mypy-type-checker",
+
+        // Lint / format (matches what pre-commit will run)
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+
+        // Markdown / docs
+        "esbenp.prettier-vscode",
+        "DavidAnson.vscode-markdownlint",
+        "yzhang.markdown-all-in-one",
+
+        // SCM + container ergonomics
+        "eamodio.gitlens",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        // Pin the interpreter to the workspace venv populated by
+        // postCreateCommand. Pylance and pytest discovery both honour this.
+        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+        // The venv is on PATH already via the Dockerfile / uv sync; don't
+        // let VS Code's terminal re-activate it and break the prompt.
+        "python.terminal.activateEnvironment": false,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  },
+
+  // Forward FastAPI port + sibling-service ports. Adding a port here does
+  // NOT start the corresponding service — sibling services live in
+  // docker-compose.yml and (for profile-gated ones like redis) need an
+  // explicit `dc --profile data up -d` to start.
+  "forwardPorts": [
+    8000, // main service / FastAPI
+    6379 // redis sibling (when started via the `data` profile)
+  ],
+
+  // Forward the host's SSH agent so `git push` to private GitHub repos works
+  // without copying keys into the container.
+  "mounts": ["source=${localEnv:SSH_AUTH_SOCK},target=/ssh-agent,type=bind"],
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": "/ssh-agent"
+  }
+}
