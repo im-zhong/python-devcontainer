@@ -1,0 +1,150 @@
+# =============================================================================
+# CI for python-devcontainer.
+# =============================================================================
+#
+# Mirrors the local toolchain exactly so "green on my machine" == "green in CI":
+#
+#   - uv (workspace-aware, manages .venv from uv.lock)
+#   - Python 3.12              (from .python-version / pyproject `requires-python`)
+#   - ruff check + ruff format (lint + formatting; same codes as [tool.ruff.lint])
+#   - ty                       (whole-project type-check, same as pre-commit hook)
+#   - pytest                   (root tests + every packages/*/tests, per
+#                               [tool.pytest.ini_options].testpaths)
+#   - pre-commit               (runs the file-hygiene hooks that don't have
+#                               a direct Python equivalent — large-file guard,
+#                               EOL normalisation, etc.)
+#   - uv build                 (sanity-check that the workspace produces a
+#                               wheel + sdist with the uv_build backend)
+#
+# Decision: every Python tool is invoked via `uv run --frozen`, NOT via
+# `pip install ruff` or `actions/setup-python` + manual installs.
+# `--frozen` makes uv REFUSE to mutate the lockfile at job time, so CI
+# fails LOUDLY if pyproject.toml drifted from uv.lock — exactly the
+# same contract the pre-commit hooks rely on locally.
+# Reference: https://docs.astral.sh/uv/guides/integration/github/
+#
+# Security note: no untrusted event inputs (PR title/body, commit msg, head
+# ref, etc.) flow into any `run:` step, so workflow-injection isn't a risk
+# here. The only ${{ ... }} expressions are `github.workflow` / `github.ref`
+# used for concurrency grouping, both repo-controlled.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual trigger so you can re-run CI without an empty commit.
+  workflow_dispatch:
+
+# Cancel in-flight runs for the same PR/branch when a newer commit lands.
+# Keeps queue time low and avoids wasting minutes on superseded SHAs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default: the workflow only needs to read the repo.
+# Any job that needs more (e.g. publishing) must opt-in explicitly.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Single combined job: lint → type-check → test → build.
+  #
+  # Why one job instead of four parallel ones:
+  #   - The `uv sync` step is the long pole (cold cache ~20–40s). Splitting
+  #     into 4 jobs would pay that cost 4× and still serialise on the cache.
+  #   - On a small monorepo the steps are seconds each; parallelising them
+  #     across jobs would only add overhead.
+  #
+  # If the project grows and any single step starts dominating wall time,
+  # promote it to its own job and let actions/cache de-dupe `.venv`.
+  # ---------------------------------------------------------------------------
+  ci:
+    name: lint - type-check - test - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # pre-commit's check-merge-conflict / large-file hooks only look
+          # at the working tree, so shallow clone is fine.
+          fetch-depth: 1
+
+      # uv ships its own Python - no actions/setup-python needed. The
+      # version pin (`>=0.11,<0.12`) matches the `uv_build` range in
+      # pyproject.toml so the build backend and CLI move together.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.x"
+          # Bake the global uv cache + the project's .venv into the
+          # actions/cache layer, keyed on uv.lock. Subsequent runs that
+          # don't change the lockfile install from cache in seconds.
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # Pulls the interpreter declared in .python-version (3.12). Done as
+      # a separate step so the cache-miss download shows up in its own
+      # log group instead of being hidden inside `uv sync`.
+      - name: Install Python
+        run: uv python install
+
+      # `--all-packages` installs every workspace member into the single
+      # shared .venv, matching what the devcontainer does. Without it,
+      # only the root project would be installed and pytest discovery
+      # of packages/*/tests would import-fail.
+      - name: Install project (uv sync --all-packages)
+        run: uv sync --all-packages --frozen
+
+      # ---- lint --------------------------------------------------------------
+      # `--no-fix`: CI must FAIL on lint issues, not silently rewrite them.
+      # (The pre-commit hook uses `--fix` because it's running pre-commit
+      # locally where auto-fix is desirable; CI's job is to gate.)
+      - name: Ruff - lint
+        run: uv run --frozen ruff check --no-fix --output-format=github .
+
+      # `--check`: report drift instead of rewriting. Same formatter that
+      # ruff-format runs locally, so output is byte-identical.
+      - name: Ruff - format check
+        run: uv run --frozen ruff format --check .
+
+      # ---- type-check --------------------------------------------------------
+      # Whole-project ty run (matches pass_filenames=false in pre-commit).
+      - name: ty - type check
+        run: uv run --frozen ty check
+
+      # ---- test --------------------------------------------------------------
+      # `testpaths` in pyproject.toml already covers root + packages/*/tests.
+      # `--color=yes` keeps GitHub's log viewer colourised.
+      - name: pytest
+        run: uv run --frozen pytest --color=yes
+
+      # ---- file-hygiene hooks ------------------------------------------------
+      # Runs the REMOTE hooks defined in .pre-commit-config.yaml
+      # (large-file guard, trailing-whitespace, end-of-file-fixer,
+      # check-toml, check-yaml, mixed-line-ending, check-merge-conflict).
+      # The local hooks (ruff/ty) were already run above as native steps,
+      # but re-running them via pre-commit is cheap and confirms the
+      # hook wiring itself still works.
+      - name: pre-commit (all hooks)
+        run: uv run --frozen pre-commit run --all-files --show-diff-on-failure
+
+      # ---- build sanity check ------------------------------------------------
+      # Catches regressions in the uv_build backend config - e.g. a renamed
+      # package directory that breaks src/ auto-discovery would be caught
+      # here, not at the next release.
+      - name: uv build (wheel + sdist)
+        run: uv build --all-packages
+
+      # - name: Upload build artifacts
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: dist
+      #     path: dist/
+      #     if-no-files-found: error
+      #     retention-days: 7
