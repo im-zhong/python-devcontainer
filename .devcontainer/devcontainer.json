@@ -23,7 +23,11 @@
   // skip it. The resulting `.venv/` lives inside the bind-mount, so the
   // host can introspect it (handy for host-side IDE plugins) but Python
   // itself comes from uv's managed interpreter cache, NOT the host's.
-  "postCreateCommand": "uv sync --all-packages",
+  // `pre-commit install` is idempotent and writes a hook file with the
+  // in-container venv's Python path baked in — so it must run inside the
+  // container, not on the host. Chained after `uv sync` because the hook
+  // depends on the pre-commit binary in `.venv/`.
+  "postCreateCommand": "uv sync --all-packages && uv run pre-commit install",
 
   // On every attach: align the in-container `docker` group GID with the
   // bind-mounted /var/run/docker.sock so `docker compose ...` works without
