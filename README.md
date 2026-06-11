@@ -13,10 +13,13 @@ container, using:
 
 ```
 .
-├── .devcontainer/
-│   ├── devcontainer.json     # VS Code "Reopen in Container" entry point
-│   └── docker-compose.yml    # `dev` service + named caches + host passthrough
-├── dev.Dockerfile            # Ubuntu 24.04 + uv + Node 22 + Claude Code
+├── .devcontainer/            # everything needed to build & attach the dev container
+│   ├── devcontainer.json     #   VS Code "Reopen in Container" entry point
+│   ├── docker-compose.yml    #   `dev` service + named caches + host passthrough
+│   ├── Dockerfile            #   Ubuntu 24.04 + uv + Node 22 + Claude Code
+│   └── post-start.sh         #   per-attach: docker.sock GID, git safe.dir, ssh-agent check
+├── docs/                     # long-form prose docs (linked from comments + README)
+│   └── ssh-agent.md          #   one-time host setup for SSH agent forwarding
 ├── pyproject.toml            # workspace root AND main service
 ├── src/
 │   └── python_devcontainer/  # main service code
@@ -26,6 +29,11 @@ container, using:
 │       └── src/pdc_core/
 └── tests/                    # tests for the main service
 ```
+
+The `.devcontainer/` directory is **self-contained** — every file the
+dev environment needs (image recipe, compose, attach hook) lives there.
+Day-to-day prose docs go in `docs/`; comments in code/config link to them
+by relative path so they stay discoverable from inside an editor.
 
 The repo root is **both** the workspace root and the main service —
 `[tool.uv.workspace]` declares `packages/*` as members, and the main

@@ -1,23 +1,42 @@
+# =============================================================================
 # Compose project for the python-devcontainer monorepo.
+# =============================================================================
 #
 # The `dev` service is what VS Code attaches to. Everything else here is a
 # *sibling service* on the same docker network — dev can reach them by
 # service name (e.g. `redis://redis:6379`).
 #
-# Workflow inside the dev container:
+# Workflow inside the dev container (alias `dc` is set up in
+# .devcontainer/Dockerfile):
 #
 #   dc ps                       # list this project's services
 #   dc logs -f redis            # follow one service's logs
-#   dc restart redis            # restart it without rebuilding the image
-#   dc --profile data up -d     # start optional profiles (data services)
+#   dc restart redis            # restart it without rebuilding
+#   dc --profile data up -d     # start optional profiles
 #
-# `dc` is an alias for `docker compose`, baked into the dev image. The
-# COMPOSE_FILE / COMPOSE_PROJECT_NAME envs below let `dc` find this file
-# from any CWD inside the dev container.
+# -----------------------------------------------------------------------------
+# Decision: single compose file, sibling services, NOT one compose-per-service
+# -----------------------------------------------------------------------------
+# Some teams split data services into a separate compose file and import
+# with `extends:` or `include:`. We don't, because:
+#   - The `name:` below scopes everything to one project, so `dc down`
+#     means something obvious: "stop everything related to this repo".
+#   - VS Code's devcontainer integration only watches ONE compose file.
+#     Splitting requires extra `dockerComposeFile:` array entries and is
+#     a leaky abstraction (you have to remember which file owns what).
+#   - We're a small monorepo. When this file passes ~200 lines, revisit.
 
-# Stable project name — without this, compose derives one from the directory
-# name, which breaks if the repo gets cloned to a different folder. The dev
-# container also uses this name to address its siblings.
+# -----------------------------------------------------------------------------
+# Decision: explicit project name, NOT compose's directory-based default
+# -----------------------------------------------------------------------------
+# Without `name:`, compose derives the project name from the directory
+# containing this file — here, `.devcontainer`. That name shows up in
+# `docker ps` columns, in network names, in volume names. Consequences:
+#   - If someone clones the repo into a different folder name, every
+#     volume reference becomes a fresh, empty volume. Caches gone.
+#   - The name `.devcontainer` looks meaningless in `docker ps -a`
+#     output across multiple projects.
+# Pinning it once here makes the project identity stable and readable.
 name: python-devcontainer
 
 services:
@@ -25,82 +44,187 @@ services:
   # dev — the editor-attached container
   # ===========================================================================
   dev:
+    # Build context is the REPO ROOT (..), not .devcontainer/, so the
+    # Dockerfile can `COPY` repo-root files in the future if needed.
+    # The dockerfile path is relative to the build context — the file
+    # itself lives next to this compose file, so prefix with `.devcontainer/`.
+    #
+    # Why the file is named bare `Dockerfile` (not `dev.Dockerfile`):
+    # its location inside `.devcontainer/` already conveys the role; the
+    # `dev.` prefix would be redundant. Production images, when we add
+    # them, live OUTSIDE this directory (e.g. `deploy/api.Dockerfile`)
+    # so there's no namespace collision to disambiguate.
     build:
       context: ..
-      dockerfile: dev.Dockerfile
+      dockerfile: .devcontainer/Dockerfile
+
+    # See .devcontainer/Dockerfile's CMD comment — we re-state it here so that
+    # bare `docker compose up` from the CLI behaves correctly even
+    # without devcontainer wrapping the lifecycle.
     command: sleep infinity
 
     volumes:
-      # Workspace bind-mount. Path must match `workspaceFolder` in
-      # devcontainer.json. `cached` is a macOS-only hint, no-op on Linux/WSL.
+      # ----- Workspace bind-mount ------------------------------------------
+      # Decision: bind-mount the repo, NOT a volume copy or a clone-in-image.
+      #   - Bind: edits in VS Code instantly visible to running processes,
+      #     and changes inside the container show up on the host (so the
+      #     host can run `git diff`, IDEs can lint, etc.).
+      #   - Volume copy: too slow for a tight edit-run loop, breaks `git`.
+      #   - In-image: the whole "dev container" pattern wants the source
+      #     to live OUTSIDE the image so the image is reusable.
+      # `:cached` is a darwin-only osxfs hint that does nothing on
+      # Linux/WSL — harmless to keep for cross-platform compatibility.
       - ..:/workspaces/python-devcontainer:cached
 
-      # Named volumes — persist across container rebuilds, kept off the
-      # bind-mounted source tree for speed.
+      # ----- Named volumes for caches/data ---------------------------------
+      # Decision: ONE coarse "cache" volume covering all of ~/.cache, plus
+      # a separate "uv-data" for things that aren't really cache.
       #
-      # We mount the whole ~/.cache instead of per-tool sub-paths because
-      # most Python tooling defaults to ~/.cache/<tool>/ and adding each new
-      # tool one-by-one is busywork. Today this covers:
-      #   ~/.cache/uv             — uv's wheel / sdist cache
-      #   ~/.cache/pre-commit     — pre-commit's per-hook venvs (often huge)
-      #   ~/.cache/ruff           — ruff's incremental analysis cache
-      #   ~/.cache/ty             — ty's type-checker cache
-      # Future tools (mypy, pyright, pip, pnpm, ...) just work without
-      # touching this file.
+      # Considered:
+      #   A. Per-tool volumes (uv-cache, ruff-cache, mypy-cache, …).
+      #      Pro: precise — `docker volume rm` clears one tool's state.
+      #      Con: every new tool means editing this file + the Dockerfile
+      #           (mkdir + chown). Slop accumulates.
+      #   B. One ~/.cache volume covering all current and future tools.
+      #      ← chosen
+      #      Pro: zero-config when adding a new tool. pre-commit caches,
+      #           ruff incremental cache, ty cache, pip, pnpm, cargo —
+      #           everything Linux respects XDG_CACHE_HOME goes here.
+      #      Con: less precise; clearing one tool requires entering the
+      #           container and using that tool's own clean command.
       #
-      # uv also keeps managed Python interpreters and installed tools under
-      # ~/.local/share/uv — that's a separate volume because it's "data",
-      # not "cache" (clearing it forces re-downloading Python).
+      # Why uv-data is SEPARATE from `cache`:
+      #   ~/.local/share/uv holds uv's managed Python interpreters and
+      #   `uv tool install`-ed binaries. Losing those forces a 30MB+
+      #   Python re-download on next `uv sync`. They are "data", not
+      #   "cache" — clearing should be a deliberate act, not collateral
+      #   from a `docker volume rm cache`.
+      #
+      # Why vscode-server is SEPARATE:
+      #   It's ~100MB of node_modules + extensions on first attach,
+      #   it's specific to VS Code (other clients won't touch it),
+      #   and it has nothing to do with Python tooling. Keeping it
+      #   isolated means a "clear all Python caches" never wipes your
+      #   editor extensions.
       - cache:/home/vscode/.cache
       - uv-data:/home/vscode/.local/share/uv
       - vscode-server:/home/vscode/.vscode-server
 
-      # Claude Code passthrough from host. Skills, MCP servers, conversation
-      # history and OMC layer all "just work" inside the container.
+      # ----- Claude Code passthrough from host -----------------------------
+      # Decision: bind-mount host's Claude Code state read-write into the
+      # container. The trade-off is the in-container project's path differs
+      # from the host's, so ~/.claude.json ends up with TWO trust entries
+      # for the same repo — one with /home/zhangzhong/... and one with
+      # /workspaces/... — which is harmless but slightly noisy.
+      #
+      # Alternatives considered:
+      #   - Read-only mount: breaks Claude Code (it writes conversation
+      #     history, project trust state, MCP results back to disk).
+      #   - Don't mount: lose all OMC skills, MCP server config, prior
+      #     conversation context. Bad UX.
+      #   - Sync via dotfile bot: too much machinery for a single user.
       - ${HOME}/.claude:/home/vscode/.claude
       - ${HOME}/.claude.json:/home/vscode/.claude.json
 
-      # Git identity (read-only — keep the host config pristine).
+      # Decision: mount ~/.gitconfig READ-ONLY.
+      # Git tools inside the container can read the user's identity
+      # (name + email + signing config), but cannot accidentally mutate
+      # host-level git config. If the user ever wants to change their
+      # global config, they should do it on the host.
       - ${HOME}/.gitconfig:/home/vscode/.gitconfig:ro
 
-      # Docker-outside-of-Docker: bind-mount host's docker socket so the
-      # docker CLI inside the dev container drives the host's daemon. This
-      # is what makes `dc logs -f redis` from inside dev work.
+      # ----- Docker-outside-of-Docker socket -------------------------------
+      # See .devcontainer/Dockerfile's DooD section for the full rationale. The
+      # mount target is hard-coded because docker CLI's default lookup
+      # path is /var/run/docker.sock; choosing a non-default path would
+      # require setting DOCKER_HOST env var everywhere. Don't.
       - /var/run/docker.sock:/var/run/docker.sock
 
     environment:
+      # PYTHONDONTWRITEBYTECODE=1
+      # The workspace is bind-mounted, so any __pycache__ folders Python
+      # creates show up in `git status` and pollute IDE file trees. Better
+      # to disable on-demand compilation — UV_COMPILE_BYTECODE=1 in the
+      # Dockerfile already produces .pyc files at install time inside the
+      # venv, where they belong.
       PYTHONDONTWRITEBYTECODE: "1"
+
+      # PYTHONUNBUFFERED=1
+      # When you `uv run python -m my_service` and tail logs in the
+      # terminal, Python's default block buffering hides output for
+      # seconds at a time. Unbuffered stdio matches what users expect
+      # from interactive dev workflows.
       PYTHONUNBUFFERED: "1"
-      # Make `dc ps`, `dc logs`, etc. work from any CWD inside the dev
-      # container without needing -f / --project-name flags.
+
+      # COMPOSE_FILE / COMPOSE_PROJECT_NAME
+      # Make `dc ps`, `dc logs`, `dc restart` etc. work from ANY CWD
+      # inside the dev container, without `-f` flags or remembering the
+      # project name. Without these, `cd src/python_devcontainer && dc ps`
+      # would search for ./docker-compose.yml in the CWD and fail.
       COMPOSE_FILE: /workspaces/python-devcontainer/.devcontainer/docker-compose.yml
       COMPOSE_PROJECT_NAME: python-devcontainer
 
   # ===========================================================================
   # Sibling services
   # ===========================================================================
-  # Profile-gated so the default `up` (which is what VS Code Reopen-in-Container
-  # runs) starts only `dev`. Opt in with:
-  #   dc --profile data up -d redis
-  # This keeps cold start fast for sessions that don't need the data tier.
+  # Decision: profile-gate optional services so the default boot is fast.
+  #
+  # When VS Code's "Reopen in Container" runs `docker compose up`, it
+  # starts every service WITHOUT a profile gate. That means a sibling
+  # listed without `profiles:` would start unconditionally, paying its
+  # ~2s startup cost on every attach even when you're just popping in
+  # to fix a typo.
+  #
+  # By gating optional services behind `profiles: [data]`, the default
+  # boot only starts `dev`. Opt in explicitly with:
+  #     dc --profile data up -d redis
+  #
+  # When you START needing redis on every session, remove the profile
+  # tag — don't fight the tooling, just promote it to default.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     profiles: ["data"]
-    # Expose to the host too — handy for redis-cli or GUI clients on the host.
-    # Inside the dev container, just connect to redis://redis:6379 — no port
-    # forwarding involved (sibling-to-sibling traffic stays on the compose
-    # network).
+
+    # Decision: publish port 6379 to the host even though dev-to-redis
+    # traffic doesn't need it. Why publish?
+    #   - Lets you run `redis-cli` from a host terminal (or use a GUI
+    #     client like RedisInsight on the host) without entering the
+    #     container.
+    #   - Cost is just a port reservation; if 6379 is already taken
+    #     on the host, change to "16379:6379" or remove the line — it
+    #     doesn't affect sibling-to-sibling communication on the
+    #     compose network.
     ports:
       - "6379:6379"
+
+    # Persist redis data across `dc restart redis` and `dc rm redis`.
+    # Cleared by either `dc rm -fsv redis` or
+    # `docker volume rm python-devcontainer_redis-data`.
     volumes:
       - redis-data:/data
 
-  # Add more siblings here as the project grows. Recommended pattern:
-  #   - data services (postgres, redis, kafka): live in compose, profile-gated
-  #   - your own application services: run with `uv run ...` inside `dev` for
-  #     hot reload + debugger; only containerise them for staging-like runs
+  # ---- Recipe for adding more siblings ---------------------------------------
+  # When you add a new service, decide which BUCKET it falls into:
+  #   1. Data services (postgres, kafka, minio, …):
+  #      → Live HERE in compose. They have stable images, you don't
+  #        change their code, and you want them to outlive your venv.
+  #      → Put behind a profile if not used every session.
+  #   2. Your own application services (api, worker, scheduler, …):
+  #      → Run with `uv run …` INSIDE the dev container. Compose-ing
+  #        your own code means rebuilding the image on every change
+  #        — kills the debugger / hot-reload story.
+  #      → Containerise them only when doing staging-like end-to-end
+  #        runs, and even then with a SEPARATE compose file.
 
+# =============================================================================
+# Volumes — name them in this top-level block so they actually persist.
+# =============================================================================
+# Volumes referenced in services.<svc>.volumes that are NOT declared here
+# would still work (Docker auto-creates anonymous volumes), but anonymous
+# volumes are pruned with `docker volume prune` and harder to identify in
+# `docker volume ls`. Naming them is essentially free and makes lifecycle
+# operations explicit.
 volumes:
   cache:
   uv-data:

@@ -1,69 +1,147 @@
+// =============================================================================
+// Devcontainer for the python-devcontainer monorepo.
 // https://containers.dev/implementors/json_reference/
+// =============================================================================
 //
-// Devcontainer for the python-devcontainer monorepo. "Reopen in Container"
-// from the repo root picks this up automatically; the `dev` service in the
-// sibling docker-compose.yml is the one VS Code attaches to.
+// Decision: Compose-backed devcontainer, NOT a plain Dockerfile-backed one.
+//
+// Considered:
+//   A. Single Dockerfile referenced via "dockerFile":
+//      → Simple, but no support for sibling services (redis, postgres, …)
+//        without launching them as separate containers manually.
+//   B. Compose file referenced via "dockerComposeFile" + "service".
+//      ← chosen
+//      → Lets us add data services later without restructuring.
+//      → The dev container is one of N siblings on the same network.
+//
+// "Reopen in Container" from the repo root picks this file up automatically.
 {
   "name": "python-devcontainer",
 
   "dockerComposeFile": ["docker-compose.yml"],
   "service": "dev",
 
-  // Must match the bind-mount destination in docker-compose.yml.
+  // Decision: workspaceFolder MUST match the bind-mount destination in
+  // docker-compose.yml exactly. If they drift, VS Code attaches to a
+  // path that exists only as an empty directory, and you'll see "no
+  // workspace folder" or "command not found: uv" surprises.
   "workspaceFolder": "/workspaces/python-devcontainer",
 
-  // Renumber the in-container `vscode` user (UID 1000 by default) to match
-  // the host user's UID/GID at attach time. Without this, files created
-  // inside the container can end up root-owned on the host.
+  // -------------------------------------------------------------------------
+  // Decision: vscode user + updateRemoteUserUID renumbering
+  // -------------------------------------------------------------------------
+  // The image creates `vscode` at UID 1000. updateRemoteUserUID makes the
+  // devcontainer client (VS Code Dev Containers extension or the
+  // `devcontainer` CLI) renumber that user to match the HOST user's UID
+  // *before* attaching. Concretely: it execs `usermod -u <host_uid>` and
+  // `chown -R` on the home directory at attach time.
+  //
+  // Why this matters: files created inside the container land on the
+  // bind-mounted host filesystem. Without renumbering, every file would
+  // show up as UID 1000 on the host — fine on most setups, but breaks if
+  // the host UID is 1001+, which is common in corporate environments.
+  //
+  // Caveat: this is a feature of the devcontainer CLIENT, not docker
+  // itself. Bare `docker compose exec dev bash` skips it. For this
+  // single-user template, that's an acceptable limitation.
   "remoteUser": "vscode",
   "updateRemoteUserUID": true,
 
-  // Sync the entire uv-managed workspace (root project + all packages/*).
-  // Runs once after the container is first created; subsequent attaches
-  // skip it. The resulting `.venv/` lives inside the bind-mount, so the
-  // host can introspect it (handy for host-side IDE plugins) but Python
-  // itself comes from uv's managed interpreter cache, NOT the host's.
-  // `pre-commit install` is idempotent and writes a hook file with the
-  // in-container venv's Python path baked in — so it must run inside the
-  // container, not on the host. Chained after `uv sync` because the hook
-  // depends on the pre-commit binary in `.venv/`.
+  // -------------------------------------------------------------------------
+  // Decision: postCreateCommand for one-shot init, postStartCommand for
+  // every-attach state alignment.
+  // -------------------------------------------------------------------------
+  // Lifecycle hooks (in order):
+  //   - onCreateCommand   : runs ONCE, before the user even sees the
+  //                         container. We don't use it; postCreate is
+  //                         enough and simpler to reason about.
+  //   - postCreateCommand : runs ONCE after first creation.
+  //                         Right place for: dependency install, hook
+  //                         wiring — things that don't need to repeat.
+  //   - postStartCommand  : runs on EVERY container start (incl. reboot).
+  //                         Right place for: state alignment that depends
+  //                         on host-side facts (docker.sock GID, git
+  //                         safe.directory). Must be idempotent + fast.
+  //   - postAttachCommand : runs on every VS Code attach. Rarely needed.
+  //
+  // Why uv sync && pre-commit install in postCreate, not postStart:
+  //   `uv sync` is expensive on a fresh image (downloads Python + wheels);
+  //   running it on every attach would be unnecessarily slow.
+  //   `pre-commit install` writes a single file into .git/hooks; it's
+  //   idempotent so we COULD put it in postStart, but the cost of the
+  //   no-op rerun is greater than the cost of remembering to rebuild the
+  //   container if hooks ever go missing. PostCreate it is.
+  //
+  // Why pre-commit install must run INSIDE the container:
+  //   The script pre-commit writes into .git/hooks/pre-commit hard-codes
+  //   the Python interpreter path used at install time. If we ran it on
+  //   the host, the path would be a host venv that doesn't exist in the
+  //   container, and the hook would fail. The hook file lives in
+  //   /workspaces/python-devcontainer/.git which is bind-mounted, so the
+  //   in-container install IS visible to host-side `git commit` too —
+  //   but only if you also have a `.venv/bin/python` reachable on the
+  //   host. Most contributors will only commit from inside the container.
   "postCreateCommand": "uv sync --all-packages && uv run pre-commit install",
 
-  // On every attach: align the in-container `docker` group GID with the
-  // bind-mounted /var/run/docker.sock so `docker compose ...` works without
-  // sudo, and mark the bind-mounted repo as a safe git directory. The script
-  // is idempotent and fast (no-op when nothing changes).
+  // post-start.sh handles two host-dependent realignments — see the
+  // script itself for details. Idempotent and ~50ms when there's
+  // nothing to do.
   "postStartCommand": "bash .devcontainer/post-start.sh",
 
+  // -------------------------------------------------------------------------
+  // VS Code customisations (extensions + settings)
+  // -------------------------------------------------------------------------
+  // Decision: list extensions explicitly here, NOT in a host-side
+  // settings.json. This file is committed; everyone gets the same Python
+  // tooling on first attach, no per-user setup tax. Add to this list when
+  // a tool becomes core to the project.
   "customizations": {
     "vscode": {
       "extensions": [
-        // Python toolchain
+        // Python toolchain — the type checker is `ty`, but the Python /
+        // Pylance pair still provides IntelliSense, debugger, env
+        // detection. Pylance's type-checking is disabled implicitly
+        // because we don't run mypy/pyright; ty's editor integration
+        // is the source of truth for type errors.
         "ms-python.python",
         "ms-python.debugpy",
-        "ms-python.vscode-pylance",
-        "ms-python.mypy-type-checker",
+        // "ms-python.vscode-pylance",
+        "astral-sh.ty",
 
-        // Lint / format (matches what pre-commit will run)
+        // Lint / format. Ruff covers black + isort + flake8 + many
+        // bug-finders. The extension uses the workspace .venv's ruff
+        // binary thanks to `python.defaultInterpreterPath`, so the
+        // version matches what pre-commit runs (single-source-of-truth
+        // — see .pre-commit-config.yaml).
         "charliermarsh.ruff",
         "tamasfe.even-better-toml",
 
-        // Markdown / docs
+        // Markdown / docs ergonomics.
         "esbenp.prettier-vscode",
         "DavidAnson.vscode-markdownlint",
         "yzhang.markdown-all-in-one",
+        "shd101wyy.markdown-preview-enhanced",
+        "bierner.markdown-mermaid",
 
-        // SCM + container ergonomics
+        // SCM + container.
         "eamodio.gitlens",
         "ms-azuretools.vscode-docker"
       ],
       "settings": {
         // Pin the interpreter to the workspace venv populated by
-        // postCreateCommand. Pylance and pytest discovery both honour this.
+        // postCreateCommand. Pylance + pytest discovery + the Ruff
+        // extension all key off this. ${containerWorkspaceFolder}
+        // expands to /workspaces/python-devcontainer at runtime.
         "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
-        // The venv is on PATH already via the Dockerfile / uv sync; don't
-        // let VS Code's terminal re-activate it and break the prompt.
+
+        // Decision: do NOT auto-activate the venv in new terminals.
+        // The Dockerfile's PATH already starts with .venv/bin (via the
+        // postCreate's `uv sync` materialising it), so `python` already
+        // resolves correctly. Letting VS Code re-source activate.sh
+        // would prepend `(.venv)` to the prompt and re-export PATH,
+        // which fights with shell prompt customisations.
         "python.terminal.activateEnvironment": false,
+
         "[python]": {
           "editor.defaultFormatter": "charliermarsh.ruff",
           "editor.formatOnSave": true
@@ -72,17 +150,35 @@
     }
   },
 
-  // Forward FastAPI port + sibling-service ports. Adding a port here does
-  // NOT start the corresponding service — sibling services live in
-  // docker-compose.yml and (for profile-gated ones like redis) need an
-  // explicit `dc --profile data up -d` to start.
+  // -------------------------------------------------------------------------
+  // Port forwarding — declared, not started.
+  // -------------------------------------------------------------------------
+  // Listing a port here only tells VS Code to forward it from the
+  // container to the host when the in-container process binds it.
+  // It does NOT cause any service to start. Sibling services (redis)
+  // start only when their compose profile is brought up explicitly.
   "forwardPorts": [
-    8000, // main service / FastAPI
-    6379 // redis sibling (when started via the `data` profile)
+    8000, // main service / FastAPI when you start it via `uv run`
+    6379 // redis sibling (when started via `dc --profile data up -d`)
   ],
 
-  // Forward the host's SSH agent so `git push` to private GitHub repos works
-  // without copying keys into the container.
+  // -------------------------------------------------------------------------
+  // Decision: forward host's SSH agent socket via `mounts:` instead of
+  // copying SSH keys into the container.
+  // -------------------------------------------------------------------------
+  // Why agent forwarding (and not key bind-mount, not key-in-image, not
+  // HTTPS+PAT): the container can sign auth challenges so `git push`
+  // works, but private key BYTES never enter the container's filesystem.
+  // The agent — which holds the decrypted key in memory — runs on the
+  // host; the container only sends "please sign this" RPCs over the
+  // forwarded Unix socket. This is the OWASP/best-practice answer:
+  // smallest attack surface, easiest rotation, transparently supports
+  // hardware-backed keys (YubiKey / Secure Enclave / FIDO sk-*).
+  //
+  // Prerequisite: the host must have ssh-agent running with a key added,
+  // AND $SSH_AUTH_SOCK must be exported in the shell that launches VS
+  // Code. Full rationale + setup instructions in docs/ssh-agent.md.
+  // post-start.sh emits a diagnostic if the socket isn't reachable.
   "mounts": ["source=${localEnv:SSH_AUTH_SOCK},target=/ssh-agent,type=bind"],
   "remoteEnv": {
     "SSH_AUTH_SOCK": "/ssh-agent"
