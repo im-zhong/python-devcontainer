@@ -49,6 +49,12 @@ which makes them install in editable mode automatically.
 3. First boot builds the image and runs `uv sync --all-packages`. You then
    land in `/workspaces/python-devcontainer` with `.venv/` ready.
 
+> **One-time host setup for `git push`:** the devcontainer forwards the host's
+> SSH agent (private keys never enter the container — see the design notes in
+> `.devcontainer/devcontainer.json`). If `git push` inside the container errors
+> with `Permission denied (publickey)`, follow
+> [`docs/ssh-agent.md`](docs/ssh-agent.md) once.
+
 ### On the host (without the container)
 
 ```bash
