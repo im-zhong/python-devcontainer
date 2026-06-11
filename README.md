@@ -40,6 +40,38 @@ The repo root is **both** the workspace root and the main service —
 service depends on them via `[tool.uv.sources]` with `workspace = true`,
 which makes them install in editable mode automatically.
 
+## Using this as a template for a new app
+
+The repo is set up as a usable template — `python-devcontainer` is its
+own name, but you'll usually want to rename everything to `myapp` (or
+whatever) when starting a new project. A `bootstrap.py` script does the
+rename in one shot and self-deletes:
+
+```bash
+# 1. Copy the template (clone, then drop the .git history)
+git clone https://github.com/<you>/python-devcontainer myapp
+cd myapp
+rm -rf .git
+
+# 2. Rename. Use --dry-run first if unsure.
+./bootstrap.py myapp                    # main app named myapp
+./bootstrap.py my-cool-api              # dashes auto-mapped to underscores
+./bootstrap.py myapp --rename-core mya  # also rename pdc-core → mya-core
+
+# 3. Initialise as your own repo
+git init && git add -A && git commit -m "initial commit"
+uv sync --all-packages
+```
+
+After that, "Reopen in Container" picks up the new project name; docker
+volumes, the workspace path, and the package name are all consistent.
+
+The `bootstrap.py` script's module docstring documents *why* it picks
+this approach (a one-shot rename script over copier/cookiecutter
+templates, Python over bash, curated replacements over recursive sed,
+self-delete over leave-behind) — read it if you're considering adopting
+the template at scale.
+
 ## Getting started
 
 ### Inside the devcontainer (recommended)
