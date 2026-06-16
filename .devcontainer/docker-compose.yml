@@ -123,6 +123,15 @@ services:
       #   - Don't mount: lose all OMC skills, MCP server config, prior
       #     conversation context. Bad UX.
       #   - Sync via dotfile bot: too much machinery for a single user.
+      #
+      # IMPORTANT: the three host paths below (${HOME}/.claude,
+      # ${HOME}/.claude.json, ${HOME}/.gitconfig) are guaranteed to exist
+      # with the correct type by .devcontainer/initialize.sh, which runs
+      # on the host via "initializeCommand" before this compose file is
+      # evaluated. If you remove that hook, missing paths will be silently
+      # auto-created by dockerd as root-owned DIRECTORIES — the dir-onto-
+      # file mount then either fails the container start or breaks git /
+      # Claude Code inside. Don't remove the hook.
       - ${HOME}/.claude:/home/vscode/.claude
       - ${HOME}/.claude.json:/home/vscode/.claude.json
 
