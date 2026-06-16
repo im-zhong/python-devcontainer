@@ -48,6 +48,20 @@
   "updateRemoteUserUID": true,
 
   // -------------------------------------------------------------------------
+  // initializeCommand — runs on the HOST, BEFORE the container is built or
+  // started. The only lifecycle hook that runs outside the container.
+  // -------------------------------------------------------------------------
+  // We use it to pre-create the host-side bind-mount sources for
+  // ~/.claude, ~/.claude.json and ~/.gitconfig. Without this, a missing
+  // host file is silently auto-created by dockerd as a ROOT-OWNED
+  // DIRECTORY, which either fails the start (dir-onto-file mount) or
+  // breaks tools inside (git treating its config dir as garbage).
+  // Full rationale + recovery instructions live in initialize.sh itself.
+  //
+  // Path is relative to the directory containing this devcontainer.json.
+  "initializeCommand": "bash .devcontainer/initialize.sh",
+
+  // -------------------------------------------------------------------------
   // Decision: postCreateCommand for one-shot init, postStartCommand for
   // every-attach state alignment.
   // -------------------------------------------------------------------------
