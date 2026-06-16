@@ -180,51 +180,35 @@ RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
     && usermod -aG docker ${USERNAME}
 
 # -----------------------------------------------------------------------------
-# Decision: pre-create named-volume mountpoints in the image AND realign
-# in post-start.sh — defense in depth.
+# Decision: pre-create ~/.local in the image so later per-user RUN steps
+# don't trip over a missing umbrella directory. Nothing fancier.
 # -----------------------------------------------------------------------------
-# The problem: when docker-compose mounts a named volume onto a path that
-# DOESN'T exist in the image, Docker creates the directory itself — and
-# the daemon runs as root, so the new directory is owned root:root mode
-# 755. The vscode user (UID 1000) then can't write to it. The first
-# observable symptom is VS Code Server failing to attach with:
-#     mkdir: cannot create directory '/home/vscode/.vscode-server/bin':
-#     Permission denied
-# The same happens to `~/.cache` (uv tries to write wheels) and
-# `~/.local/share/uv` (uv tries to install Python).
+# Why this RUN is so small now (history lesson):
+#   This block used to also pre-create + chown ~/.vscode-server, ~/.cache,
+#   and ~/.local/share/uv. Those were named-volume mountpoints; the chown
+#   existed to seed first-mount ownership before Docker mounted an empty
+#   volume on top. The seed worked for FIRST mount but didn't survive
+#   cross-host UID drift, which led to a chain of failures (postStart
+#   chown safety net, then a PID-1 entrypoint chown when postStart proved
+#   too late). The fix was structural: switch those three to bind mounts
+#   under .devcontainer/volumes/, which inherit the host UID for free.
+#   See docker-compose.yml's bind-mount block for the full story.
 #
-# This image-time pre-create + chown handles the FIRST-MOUNT case:
-# when a named volume is empty, Docker uses the image's mountpoint
-# ownership as the seed for the underlying volume directory.
+#   With that change, the only remaining reason to touch /home/vscode/
+#   at image-build time is to ensure ~/.local exists before the per-user
+#   `curl ... | sh` installers below (uv, claude code) try to drop binaries
+#   into ~/.local/bin/. Bind mounts handle .local/share/uv and the editor
+#   path expansion handles ~/.local/bin, but the umbrella directory itself
+#   doesn't get auto-created — and an installer doing `mkdir ~/.local/bin`
+#   before ~/.local exists works on most systems but is brittle.
 #
-# But it does NOT handle the "volume already exists with wrong UID"
-# case (e.g. volume populated on a previous host with a different UID,
-# or by a prior crashed attach that left root-owned files behind).
-# The image's chown is baked into a cached layer and never re-runs.
-# That gap is closed by .devcontainer/entrypoint.sh, which runs as
-# PID 1 BEFORE the devcontainer CLI does any work in the container,
-# and chowns each mountpoint when its top-level ownership is wrong.
-# (We can't use a postStartCommand for this because the CLI's
-# GPG-passthrough and connection-token write happen before postStart.)
-#
-# MAINTENANCE NOTE — the list of mountpoints here MUST match the list
-# in entrypoint.sh's VOLUME_MOUNTPOINTS array AND the named-volume
-# bind targets in docker-compose.yml. Three places, one truth. When
-# adding a new named volume mounted under /home/vscode/, update all
-# three or the wrong-UID bug will recur for that mount.
-#
-# Why we ALSO chown /home/${USERNAME}/.local (the umbrella, not just
-# .local/share/uv): later RUN steps install per-user tooling under
-# .local/bin and .local/share, and they need a vscode-owned parent
-# even though only one subdirectory is volume-backed.
-RUN mkdir -p \
-        /home/${USERNAME}/.vscode-server \
-        /home/${USERNAME}/.cache \
-        /home/${USERNAME}/.local/share/uv \
-    && chown -R ${USERNAME}:${USERNAME} \
-        /home/${USERNAME}/.vscode-server \
-        /home/${USERNAME}/.cache \
-        /home/${USERNAME}/.local
+#   Why chown ~/.local instead of relying on the later USER switch:
+#   the RUN that follows switches to USER ${USERNAME} for the installers,
+#   so any files THEY create are vscode-owned. But the umbrella ~/.local
+#   directory is created BEFORE that switch (here, as root), so we chown
+#   it explicitly so the vscode user can write into it.
+RUN mkdir -p /home/${USERNAME}/.local \
+    && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.local
 
 # -----------------------------------------------------------------------------
 # Decision: write shell aliases to /etc/bash.bashrc, NOT ~/.bashrc
@@ -346,38 +330,16 @@ ENV PATH="/home/${USERNAME}/.local/bin:${PATH}" \
     UV_PYTHON_PREFERENCE=only-managed
 
 # -----------------------------------------------------------------------------
-# Decision: ENTRYPOINT wrapper for early-start ownership normalization
+# No ENTRYPOINT — Docker's default (none) is correct here.
 # -----------------------------------------------------------------------------
-# Background:
-#   When a named volume is mounted onto /home/vscode/.vscode-server (or
-#   /home/vscode/.cache, or /home/vscode/.local/share/uv), its contents
-#   may be owned by the WRONG UID — root if dockerd auto-created the
-#   directory, or some legacy UID from a previous host. The devcontainer
-#   CLI's `updateRemoteUserUID` only renumbers files originally owned by
-#   UID 1000, so files owned by anything else stay broken and cause
-#   subsequent attach steps (GPG copy, connection-token write) to fail
-#   with EACCES. No lifecycle hook (postCreate/postStart/postAttach) is
-#   early enough to fix this — they all run AFTER updateRemoteUserUID.
-#
-# Considered fixes:
-#   A. ENTRYPOINT wrapper that chowns before exec'ing CMD.  ← chosen
-#      Runs as PID 1, before the devcontainer CLI does ANY work in the
-#      container. The only hook early enough to catch every failure mode.
-#   B. Switch image to root user + drop privileges in entrypoint via
-#      runuser/gosu.
-#      → bigger architectural change; we already have `USER vscode` with
-#        passwordless sudo, which gives the entrypoint the same privilege
-#        without changing PID 1's identity.
-#   C. Replace named volumes with bind mounts under .devcontainer/volumes/.
-#      → host UID inherited for free, no chown ever needed; but cache
-#        contents leak into repo dir + slower I/O on macOS. Larger
-#        scope than this fix.
-#
-# See entrypoint.sh for the full chown rationale and the maintenance note
-# linking it to docker-compose.yml and the pre-create RUN block above.
-COPY --chown=root:root .devcontainer/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod 0755 /usr/local/bin/entrypoint.sh
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# An earlier iteration of this Dockerfile shipped an entrypoint.sh that
+# chowned named-volume mountpoints at PID-1 time to work around UID
+# mismatches that named volumes introduced. When we switched those mounts
+# to bind mounts (see docker-compose.yml's bind-mount block), the
+# entrypoint became unnecessary: bind mounts inherit the host UID from
+# the filesystem, so there's nothing to fix at start time. Removing the
+# entrypoint also removes a layer of indirection between `docker run`
+# and CMD, which makes signal handling and debugging slightly cleaner.
 
 # -----------------------------------------------------------------------------
 # Decision: long-running no-op as default CMD.

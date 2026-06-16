@@ -16,12 +16,11 @@
 #   the docker GID after an upgrade). Doing them once at create time would
 #   bake in stale assumptions.
 #
-# Note: realigning ownership of named-volume mountpoints is NOT done here
-# — that job moved to .devcontainer/entrypoint.sh, which runs as PID 1
-# before the devcontainer CLI does any work in the container. postStart
-# is too late: the CLI's GPG-passthrough copy and connection-token write
-# happen first, and both fail with EACCES on stale-UID volumes before
-# postStart ever runs.
+# Note: this script used to also realign ownership of named-volume
+# mountpoints (vscode-server, cache, uv-data). Those mounts are now bind
+# mounts under .devcontainer/volumes/, which inherit the host user's UID
+# from the filesystem — so no in-container chown is needed. The bind-mount
+# block in docker-compose.yml documents why we switched.
 
 # -e: abort on first error.  -u: undefined-variable use is an error.
 # -o pipefail: catch failures inside pipelines, not just the last command.
