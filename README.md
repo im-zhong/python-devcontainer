@@ -126,13 +126,21 @@ Re-run `uv sync --all-packages` and the main service can `import pdc_foo`.
 | ------------------- | ----------------------------- | ---- |
 | `~/.claude`         | `/home/vscode/.claude`        | rw   |
 | `~/.claude.json`    | `/home/vscode/.claude.json`   | rw   |
-| `~/.gitconfig`      | `/home/vscode/.gitconfig`     | ro   |
 
 Skills, MCP server config, conversation history, and the OMC layer all
 "just work". Project paths inside `~/.claude.json` differ between host and
 container (`/home/<user>/...` vs `/workspaces/...`), so Claude will ask you
 to trust the in-container project the first time — accept once and you're
 done.
+
+`~/.gitconfig` is intentionally **not** bind-mounted. The VS Code Dev
+Containers extension already copies host gitconfig into the container at
+attach time via its built-in `copyGitConfig` mechanism, which is the
+correct lane for this job. Bind-mounting on top of it produces either an
+EROFS failure (read-only mount) or an ever-growing host gitconfig (the
+extension appends with `>>`, so each attach would duplicate sections into
+the bind-mounted host file). See the long comment block above the volume
+section in `.devcontainer/docker-compose.yml` for the full story.
 
 ## Working with sibling services
 

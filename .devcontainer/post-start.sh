@@ -84,12 +84,17 @@ fi
 #   is cheap insurance.
 #
 # Why --system, not --global:
-#   docker-compose.yml mounts the host's ~/.gitconfig READ-ONLY into
-#   the container at /home/vscode/.gitconfig, so `git config --global`
-#   would fail with EROFS. The --system scope writes to /etc/gitconfig
-#   which lives in the container's writable rootfs. Side-benefit: the
-#   setting applies to ALL git users in the container (only `vscode`
-#   today, but defensive for future).
+#   /home/vscode/.gitconfig is owned by the VS Code Dev Containers
+#   extension — it APPENDS the host's gitconfig into that file on every
+#   attach (see the "Why ~/.gitconfig is NOT bind-mounted" block in
+#   docker-compose.yml). If we wrote our safe.directory entry to
+#   --global (which targets /home/vscode/.gitconfig), it would survive
+#   one attach and then get clobbered/duplicated as the extension
+#   appended host config on top of it. --system writes to /etc/gitconfig
+#   in the container's writable rootfs — outside the extension's reach,
+#   so it survives across attaches without fighting the copy mechanism.
+#   Side-benefit: the setting applies to ALL git users in the container
+#   (only `vscode` today, but defensive for future).
 #
 # Why `--add` and not `--replace-all`:
 #   Idempotent. Re-adding the same path is a no-op (git dedupes

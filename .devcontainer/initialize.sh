@@ -64,7 +64,12 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # if mis-owned; we let them be created or reused as-is, and the host UID
 # inheritance via bind-mount semantics handles the ownership story inside
 # the container.
-for path in "${HOME}/.claude.json" "${HOME}/.gitconfig"; do
+#
+# We DON'T check ~/.gitconfig anymore — see docker-compose.yml's
+# "Why ~/.gitconfig is NOT bind-mounted" block. The VS Code Dev Containers
+# extension copies it into the container at attach time; we no longer
+# bind-mount it, so no host-side existence guarantee is needed.
+for path in "${HOME}/.claude.json"; do
     if [ -d "$path" ]; then
         cat >&2 <<EOF
 [initialize] ERROR: '$path' exists but is a DIRECTORY.
@@ -127,10 +132,11 @@ if [ ! -e "${HOME}/.claude.json" ]; then
     printf '{}\n' > "${HOME}/.claude.json"
 fi
 
-# ~/.gitconfig is a FILE — git's per-user config. An empty file is a valid
-# gitconfig (git fills it in on first `git config --global`). We don't seed
-# user.name / user.email here because those are personal and shouldn't be
-# templated; the user sets them once on the host with their real identity.
-if [ ! -e "${HOME}/.gitconfig" ]; then
-    touch "${HOME}/.gitconfig"
-fi
+# We don't touch ~/.gitconfig here. The VS Code Dev Containers extension
+# copies host gitconfig into the container at attach time via its own
+# mechanism (see the long block in docker-compose.yml). If ${HOME}/.gitconfig
+# is missing on the host, the extension's copy step will be a harmless
+# no-op — git inside the container will simply have no user identity set,
+# and `git commit` will error with the usual "please tell me who you are"
+# message, which is the right failure mode (it points the user at the
+# canonical fix: `git config --global user.email/name` on the host).

@@ -252,3 +252,19 @@ __marimo__/
 # shared OMC conventions, that'll be an explicit, separate design.
 .omc/
 .zac/
+
+# Devcontainer bind-mount roots
+#   Decision: ignore .devcontainer/volumes/ — this directory holds the
+#   bind-mount sources for the dev container's caches and per-user state
+#   (uv-managed Pythons, VS Code Server install + extensions, XDG cache
+#   for ruff/pre-commit/ty/...). All contents are container-generated and
+#   regenerable; none of it is source code.
+#
+#   Why bind mounts instead of named volumes (which wouldn't need a
+#   .gitignore entry at all): named volumes carried their own UID/GID,
+#   which collided with the host's UID via updateRemoteUserUID and
+#   produced a cascade of permission-denied failures. Bind mounts inherit
+#   the host UID for free. Trading "one .gitignore entry" for "no UID-
+#   mismatch bug class" is overwhelmingly worth it. See the bind-mount
+#   block in .devcontainer/docker-compose.yml for the full history.
+.devcontainer/volumes/

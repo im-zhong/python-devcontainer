@@ -184,23 +184,52 @@ services:
       #     conversation context. Bad UX.
       #   - Sync via dotfile bot: too much machinery for a single user.
       #
-      # IMPORTANT: the three host paths below (${HOME}/.claude,
-      # ${HOME}/.claude.json, ${HOME}/.gitconfig) are guaranteed to exist
-      # with the correct type by .devcontainer/initialize.sh, which runs
-      # on the host via "initializeCommand" before this compose file is
-      # evaluated. If you remove that hook, missing paths will be silently
-      # auto-created by dockerd as root-owned DIRECTORIES — the dir-onto-
-      # file mount then either fails the container start or breaks git /
-      # Claude Code inside. Don't remove the hook.
+      # IMPORTANT: the two host paths below (${HOME}/.claude,
+      # ${HOME}/.claude.json) are guaranteed to exist with the correct
+      # type by .devcontainer/initialize.sh, which runs on the host via
+      # "initializeCommand" before this compose file is evaluated. If
+      # you remove that hook, missing paths will be silently auto-created
+      # by dockerd as root-owned DIRECTORIES — the dir-onto-file mount
+      # then either fails the container start or breaks Claude Code
+      # inside. Don't remove the hook.
       - ${HOME}/.claude:/home/vscode/.claude
       - ${HOME}/.claude.json:/home/vscode/.claude.json
 
-      # Decision: mount ~/.gitconfig READ-ONLY.
-      # Git tools inside the container can read the user's identity
-      # (name + email + signing config), but cannot accidentally mutate
-      # host-level git config. If the user ever wants to change their
-      # global config, they should do it on the host.
-      - ${HOME}/.gitconfig:/home/vscode/.gitconfig:ro
+      # ----- Why ~/.gitconfig is NOT bind-mounted here ---------------------
+      # Decision: let the VS Code Dev Containers extension copy host
+      # gitconfig into the container, instead of bind-mounting it.
+      # -----------------------------------------------------------------------
+      # We tried bind-mounting ${HOME}/.gitconfig:/home/vscode/.gitconfig:ro
+      # for "same identity inside as out, can't accidentally mutate host
+      # config" symmetry. It failed at attach time with:
+      #
+      #     # Copy /data/<user>/.gitconfig to /home/vscode/.gitconfig
+      #     (dd ... ; dd ...) >> /home/vscode/.gitconfig
+      #     /bin/sh: ... Permission denied
+      #
+      # The VS Code Dev Containers extension has a built-in feature
+      # (`dev.containers.copyGitConfig`, default ON) that APPENDS the
+      # host's gitconfig into the container's /home/vscode/.gitconfig
+      # on every attach. It's how it makes `git commit` inside the
+      # container use the host user's identity without any per-repo
+      # setup. Our :ro bind mount made the destination read-only, so
+      # the append failed with EROFS and aborted the attach.
+      #
+      # Even without :ro, the bind mount would have been wrong: the
+      # extension uses `>>` (append, not overwrite), so every attach
+      # would have duplicated host gitconfig sections into the file,
+      # and because the file IS the host file via the bind mount, the
+      # host's ~/.gitconfig would have grown unbounded with duplicate
+      # [user] / [credential] blocks. Two attaches = two [user]
+      # sections; git's last-wins semantics hides the bug until you
+      # try to edit the config and find six copies.
+      #
+      # The extension's mechanism is correct for this job and we let it
+      # handle gitconfig propagation. Trade-off: the copy is a one-time
+      # snapshot at attach, so changes the user makes to their HOST
+      # gitconfig don't propagate until the next attach. In practice
+      # gitconfig changes are rare (set up once, forget for years), so
+      # this is invisible.
 
       # ----- Docker-outside-of-Docker socket -------------------------------
       # See .devcontainer/Dockerfile's DooD section for the full rationale. The
