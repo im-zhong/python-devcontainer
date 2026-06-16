@@ -71,19 +71,19 @@ FROM ubuntu:24.04
 # `vim-doc`, `xxd`, etc.). Add them back individually if needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        sudo \
-        ca-certificates \
-        curl \
-        gnupg \
-        git \
-        openssh-client \
-        ripgrep \
-        fd-find \
-        jq \
-        less \
-        vim \
-        ncat \
-        build-essential \
+    sudo \
+    ca-certificates \
+    curl \
+    gnupg \
+    git \
+    openssh-client \
+    ripgrep \
+    fd-find \
+    jq \
+    less \
+    vim \
+    ncat \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Decision: passwordless sudo for the `sudo` group.
@@ -129,16 +129,16 @@ RUN echo "%sudo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/10-nopasswd \
 #   host-agnostic and pushes the host-specific work to runtime.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
     && chmod a+r /etc/apt/keyrings/docker.gpg \
     && . /etc/os-release \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
-        > /etc/apt/sources.list.d/docker.list \
+    https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        docker-ce-cli \
-        docker-compose-plugin \
+    docker-ce-cli \
+    docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -f docker
 
@@ -180,63 +180,44 @@ RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
     && usermod -aG docker ${USERNAME}
 
 # -----------------------------------------------------------------------------
-# Decision: pre-create named-volume mountpoints, NOT chown after first attach
+# No pre-create of /home/vscode subdirectories — `useradd -m` + per-user
+# installers handle everything we need.
 # -----------------------------------------------------------------------------
-# The problem: when docker-compose mounts a named volume onto a path that
-# DOESN'T exist in the image, Docker creates the directory itself — and
-# the daemon runs as root, so the new directory is owned root:root mode
-# 755. The vscode user (UID 1000) then can't write to it. The first
-# observable symptom is VS Code Server failing to attach with:
-#     mkdir: cannot create directory '/home/vscode/.vscode-server/bin':
-#     Permission denied
-# The same happens to `~/.cache` (uv tries to write wheels) and
-# `~/.local/share/uv` (uv tries to install Python).
+# History lesson, so nobody adds these back "defensively":
 #
-# Considered fixes:
-#   A. Pre-create + chown in the Dockerfile so the first volume mount
-#      INHERITS vscode ownership.  ← chosen
-#   B. `sudo chown` in post-start.sh on every attach.
-#      → works but slow, and forces every contributor to rebuild
-#        sudo permission expectations.
-#   C. Run the container as root.
-#      → defeats the entire UID-matching story above.
+#   This Dockerfile used to pre-create + chown ~/.vscode-server, ~/.cache,
+#   ~/.local/share/uv, and ~/.local. The first three were named-volume
+#   mountpoints — dockerd would auto-create them as root:root if absent,
+#   so we seeded vscode ownership in the image. That worked for the FIRST
+#   mount but not for cross-host UID drift (see the chain of failures
+#   documented in docker-compose.yml's bind-mount block). Fix: switch
+#   those mounts to bind mounts under .devcontainer/volumes/, which
+#   inherit the host UID from the filesystem.
 #
-# Note: option A only works once per volume. If a volume already exists
-# with bad ownership, you must delete it first (`docker volume rm`).
-# This is documented in README's cache-layout section.
-RUN mkdir -p \
-        /home/${USERNAME}/.vscode-server \
-        /home/${USERNAME}/.cache \
-        /home/${USERNAME}/.local/share/uv \
-    && chown -R ${USERNAME}:${USERNAME} \
-        /home/${USERNAME}/.vscode-server \
-        /home/${USERNAME}/.cache \
-        /home/${USERNAME}/.local
-
-# -----------------------------------------------------------------------------
-# Decision: write shell aliases to /etc/bash.bashrc, NOT ~/.bashrc
-# -----------------------------------------------------------------------------
-# /etc/bash.bashrc is sourced by every interactive bash shell BEFORE
-# ~/.bashrc. Putting our aliases here means:
-#   - They survive even if the user wipes ~/.bashrc.
-#   - They survive if /home/vscode is later bind-mounted from a host
-#     dotfiles location that brings its own ~/.bashrc.
-#   - They survive the OMC `~/.claude` passthrough (which doesn't touch
-#     ~/.bashrc today, but might tomorrow — defensive).
+#   With the volume mounts gone, the ONLY potentially-load-bearing piece
+#   left was `mkdir ~/.local` so the per-user installers below (uv,
+#   Claude Code via `curl ... | sh`) had an umbrella directory to land
+#   binaries in. We kept it "to be safe". Then we removed it and rebuilt.
+#   Everything still worked, because:
 #
-# Why these three aliases:
-#   - dc:   90% of compose invocations; saves typing.
-#   - dcl:  the most common debugging move ("show me what's happening
-#           in this service right now"); --tail=200 is enough scrollback
-#           to see the last error without flooding the terminal.
-#   - dcps: quick overview of which siblings are up.
-RUN { \
-        echo ''; \
-        echo '# python-devcontainer: shortcut for the project compose file'; \
-        echo "alias dc='docker compose'"; \
-        echo "alias dcl='docker compose logs -f --tail=200'"; \
-        echo "alias dcps='docker compose ps'"; \
-    } >> /etc/bash.bashrc
+#     1. `useradd -m ${USERNAME}` (line ~178) creates /home/vscode/ owned
+#        by vscode:vscode. Mode 0755.
+#     2. `USER ${USERNAME}` (line ~288 below) switches identity, so every
+#        subsequent RUN is vscode-as-root-of-its-own-home.
+#     3. The uv installer does its own `mkdir -p ~/.local/bin` before
+#        dropping `uv` there. Run as vscode in a vscode-owned home, that
+#        mkdir produces vscode-owned `.local/` and `.local/bin/`.
+#     4. Same for the Claude Code installer.
+#
+#   So `useradd -m` plus `USER vscode` is structurally sufficient. Any
+#   explicit pre-create of /home/vscode/* paths in the image is dead
+#   weight — it duplicates work the installers already do, and accreted
+#   in this file only because the volume-mountpoint problem made it
+#   look necessary by association. It wasn't.
+#
+#   If you later add a tool that does NOT mkdir -p its own install path,
+#   put the mkdir in the same RUN that installs it, not here — that
+#   keeps the dependency local and obvious.
 
 # -----------------------------------------------------------------------------
 # Decision: Node.js via NodeSource apt, NOT nvm
@@ -331,6 +312,18 @@ ENV PATH="/home/${USERNAME}/.local/bin:${PATH}" \
     # to it and the project's pinned interpreter version would be
     # ignored. `only-managed` makes that failure mode loud instead.
     UV_PYTHON_PREFERENCE=only-managed
+
+# -----------------------------------------------------------------------------
+# No ENTRYPOINT — Docker's default (none) is correct here.
+# -----------------------------------------------------------------------------
+# An earlier iteration of this Dockerfile shipped an entrypoint.sh that
+# chowned named-volume mountpoints at PID-1 time to work around UID
+# mismatches that named volumes introduced. When we switched those mounts
+# to bind mounts (see docker-compose.yml's bind-mount block), the
+# entrypoint became unnecessary: bind mounts inherit the host UID from
+# the filesystem, so there's nothing to fix at start time. Removing the
+# entrypoint also removes a layer of indirection between `docker run`
+# and CMD, which makes signal handling and debugging slightly cleaner.
 
 # -----------------------------------------------------------------------------
 # Decision: long-running no-op as default CMD.

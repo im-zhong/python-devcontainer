@@ -3,17 +3,24 @@
 # Devcontainer post-start hook — runs on EVERY container attach.
 # =============================================================================
 #
-# Two jobs, both idempotent and fast (no-op when nothing has changed):
+# Three jobs, all idempotent and fast (no-op when nothing has changed):
 #   1. Align the in-container `docker` group GID to the bind-mounted host
 #      docker.sock — needed because the GID is host-specific and unknowable
 #      at image-build time.
 #   2. Mark the bind-mounted workspace as a safe directory for git.
+#   3. Sanity-check that the host's SSH agent is reachable (non-fatal).
 #
 # Why these belong in postStart, not postCreate:
-#   Both depend on facts that can change BETWEEN container starts (the
+#   All three depend on facts that can change BETWEEN container starts (the
 #   user could relocate the repo on the host; Docker Desktop could change
 #   the docker GID after an upgrade). Doing them once at create time would
 #   bake in stale assumptions.
+#
+# Note: this script used to also realign ownership of named-volume
+# mountpoints (vscode-server, cache, uv-data). Those mounts are now bind
+# mounts under .devcontainer/volumes/, which inherit the host user's UID
+# from the filesystem — so no in-container chown is needed. The bind-mount
+# block in docker-compose.yml documents why we switched.
 
 # -e: abort on first error.  -u: undefined-variable use is an error.
 # -o pipefail: catch failures inside pipelines, not just the last command.

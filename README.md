@@ -15,9 +15,11 @@ container, using:
 .
 ├── .devcontainer/            # everything needed to build & attach the dev container
 │   ├── devcontainer.json     #   VS Code "Reopen in Container" entry point
-│   ├── docker-compose.yml    #   `dev` service + named caches + host passthrough
+│   ├── docker-compose.yml    #   `dev` service + bind-mounted caches + host passthrough
 │   ├── Dockerfile            #   Ubuntu 24.04 + uv + Node 22 + Claude Code
-│   └── post-start.sh         #   per-attach: docker.sock GID, git safe.dir, ssh-agent check
+│   ├── initialize.sh         #   host-side: pre-create bind-mount sources (dotfiles + volumes/)
+│   ├── post-start.sh         #   per-attach: docker.sock GID, git safe.dir, ssh-agent check
+│   └── volumes/              #   bind-mount sources for cache/uv-data/vscode-server (gitignored)
 ├── docs/                     # long-form prose docs (linked from comments + README)
 │   └── ssh-agent.md          #   one-time host setup for SSH agent forwarding
 ├── pyproject.toml            # workspace root AND main service
@@ -275,17 +277,30 @@ uv run pre-commit autoupdate
 
 The first `pre-commit run` only needs to build the small `pre-commit-hooks`
 env (~10 MB) — ruff and ty come from `.venv/`, no extra downloads. Hook
-envs live in `~/.cache/pre-commit/`, persisted on the `cache` named
-volume, so container rebuilds reuse them.
+envs live in `~/.cache/pre-commit/`, which is bind-mounted from
+`.devcontainer/volumes/cache/` on the host, so container rebuilds reuse them.
 
-## Cache layout (named volumes)
+## Cache layout (bind mounts)
 
-| Volume          | Mountpoint                     | What lives here                             |
-| --------------- | ------------------------------ | ------------------------------------------- |
-| `cache`         | `/home/vscode/.cache`          | uv wheels, pre-commit envs, ruff/ty caches  |
-| `uv-data`       | `/home/vscode/.local/share/uv` | uv-managed Python interpreters, `uv tool …` |
-| `vscode-server` | `/home/vscode/.vscode-server`  | VS Code Server + extensions                 |
-| `redis-data`    | `/data` in the redis container | redis persistence                           |
+| Host path                              | Container mountpoint           | What lives here                             |
+| -------------------------------------- | ------------------------------ | ------------------------------------------- |
+| `.devcontainer/volumes/cache/`         | `/home/vscode/.cache`          | uv wheels, pre-commit envs, ruff/ty caches  |
+| `.devcontainer/volumes/uv-data/`       | `/home/vscode/.local/share/uv` | uv-managed Python interpreters, `uv tool …` |
+| `.devcontainer/volumes/vscode-server/` | `/home/vscode/.vscode-server`  | VS Code Server + extensions                 |
+| `redis-data` (named volume)            | `/data` in the redis container | redis persistence                           |
+
+Why bind mounts (instead of Docker named volumes) for the three dev-container
+caches: named volumes bake in a UID at first mount and don't follow the host
+user's UID when the container starts on a different machine. The result was
+a series of `Permission denied` failures on attach (most visibly on the
+VS Code Server's connection-token write). Bind mounts inherit the host UID
+from the filesystem, so the same directory works across any host whose user
+the devcontainer CLI then maps `vscode` to. The trade-off: bind-mount I/O on
+**macOS / Windows (non-WSL)** is slower than native volumes — roughly 2× on
+modern Docker Desktop with VirtioFS, much worse on the legacy osxfs. On
+**Linux / WSL2** there is no measurable difference. See
+`.devcontainer/docker-compose.yml`'s bind-mount block for the full story
+(it's a long comment because the history is long).
 
 To clear one specific tool's cache without nuking the rest, prefer entering
 the dev container and using the tool's own command:
@@ -295,15 +310,22 @@ uv cache clean              # only uv's wheel cache
 uv run pre-commit clean     # only pre-commit envs
 ```
 
-To wipe a whole volume (forces re-download), from a **host** terminal:
+To wipe a whole cache directory (forces re-download), from a **host**
+terminal:
 
 ```bash
-docker volume rm python-devcontainer_cache
+rm -rf .devcontainer/volumes/cache              # XDG cache for all tools
+rm -rf .devcontainer/volumes/uv-data            # uv-managed Pythons
+rm -rf .devcontainer/volumes/vscode-server      # VS Code Server + extensions
 ```
 
-⚠️ **Avoid `docker compose down -v`** — it removes every volume in the
-project at once, including the uv-managed Python interpreter, so your next
-`uv sync` will re-download Python.
+The directories will be recreated empty on the next container start by
+`.devcontainer/initialize.sh`.
+
+⚠️ `docker compose down -v` only purges **named volumes**, so it will wipe
+`redis-data` but leave the three bind-mounted dev caches untouched. That's
+the opposite of the named-volume era — `down -v` used to be the "scorch
+the earth" command and is now mostly harmless.
 
 ## Common commands
 

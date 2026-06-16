@@ -76,39 +76,99 @@ services:
       # Linux/WSL — harmless to keep for cross-platform compatibility.
       - ..:/workspaces/python-devcontainer:cached
 
-      # ----- Named volumes for caches/data ---------------------------------
-      # Decision: ONE coarse "cache" volume covering all of ~/.cache, plus
-      # a separate "uv-data" for things that aren't really cache.
+      # ----- Bind mounts for caches/data -----------------------------------
+      # Decision: bind-mount three directories from .devcontainer/volumes/
+      # on the host, NOT Docker named volumes.
+      # -----------------------------------------------------------------------
+      # WHY (the short version): bind mounts inherit the host user's UID/GID
+      # automatically; named volumes carry their own UID and break when the
+      # host UID differs from the image's baked-in vscode UID (1000).
       #
-      # Considered:
-      #   A. Per-tool volumes (uv-cache, ruff-cache, mypy-cache, …).
-      #      Pro: precise — `docker volume rm` clears one tool's state.
-      #      Con: every new tool means editing this file + the Dockerfile
-      #           (mkdir + chown). Slop accumulates.
-      #   B. One ~/.cache volume covering all current and future tools.
-      #      ← chosen
-      #      Pro: zero-config when adding a new tool. pre-commit caches,
-      #           ruff incremental cache, ty cache, pip, pnpm, cargo —
-      #           everything Linux respects XDG_CACHE_HOME goes here.
-      #      Con: less precise; clearing one tool requires entering the
-      #           container and using that tool's own clean command.
+      # WHY (the long version, paid for in three bugs):
       #
-      # Why uv-data is SEPARATE from `cache`:
-      #   ~/.local/share/uv holds uv's managed Python interpreters and
-      #   `uv tool install`-ed binaries. Losing those forces a 30MB+
-      #   Python re-download on next `uv sync`. They are "data", not
-      #   "cache" — clearing should be a deliberate act, not collateral
-      #   from a `docker volume rm cache`.
+      #   Named volumes seemed like the right tool at first — they live
+      #   inside Docker's data root (/var/lib/docker/volumes/...), survive
+      #   image rebuilds, and have nice lifecycle commands (`docker volume
+      #   rm`). Then reality:
       #
-      # Why vscode-server is SEPARATE:
-      #   It's ~100MB of node_modules + extensions on first attach,
-      #   it's specific to VS Code (other clients won't touch it),
-      #   and it has nothing to do with Python tooling. Keeping it
-      #   isolated means a "clear all Python caches" never wipes your
-      #   editor extensions.
-      - cache:/home/vscode/.cache
-      - uv-data:/home/vscode/.local/share/uv
-      - vscode-server:/home/vscode/.vscode-server
+      #   Bug 1 (auto-creation as root): when the volume's mountpoint
+      #     didn't exist in the image, dockerd auto-created it as
+      #     root:root 0755. First write by vscode → EACCES. Fix: pre-
+      #     create + chown in the Dockerfile. Lines added: ~10.
+      #
+      #   Bug 2 (cross-host UID drift): the Dockerfile bakes vscode at
+      #     UID 1000. On a host where the user is NOT UID 1000 (corp
+      #     box: ysu_zhangzhong at e.g. UID 1234), the devcontainer
+      #     CLI runs `updateRemoteUserUID` which does `usermod -u 1234
+      #     vscode` AND `find / -uid 1000 -exec chown -h 1234`. The
+      #     `-uid 1000` filter MISSES files owned by anything else.
+      #     Volume populated on a previous host (or by a crashed start
+      #     that left root-owned files) stays misowned. Fix attempted:
+      #     `sudo chown -R` in postStartCommand. Lines added: ~30.
+      #
+      #   Bug 3 (postStart is too late): the CLI's GPG-passthrough copy
+      #     and connection-token write happen BEFORE postStartCommand.
+      #     They both fail with EACCES on a misowned volume and abort
+      #     the attach before our fix can run. Fix: move the chown to a
+      #     PID-1 entrypoint that runs before any CLI work. Lines added:
+      #     ~80 (new file + Dockerfile wiring).
+      #
+      #   Total before this commit: ~120 lines across three files, plus
+      #   a triple-write maintenance burden ("if you add a 4th volume,
+      #   update all three places").
+      #
+      # Bind mounts don't have any of these problems:
+      #
+      #   The host directory's UID is the source of truth. `initialize.sh`
+      #   creates the directories as the host user before the container
+      #   starts, so they're owned correctly from inception. Inside the
+      #   container, `updateRemoteUserUID` renumbers vscode to match
+      #   the host UID, so reads/writes "just work" — same UID on both
+      #   sides of the mount. No pre-create. No entrypoint. No post-
+      #   start chown. No cross-file maintenance note. No bugs of this
+      #   class are even structurally possible.
+      #
+      # The cost we accepted in return:
+      #
+      #   macOS performance: bind mounts go through Docker Desktop's
+      #     filesystem virtualization (VirtioFS). Roughly 2× slower
+      #     than named volumes for write-heavy workloads (uv wheel
+      #     unpack, pre-commit env builds). Linux/WSL2 hosts pay
+      #     nothing — bind mounts there are the same `bind` syscall as
+      #     named volumes under the hood.
+      #
+      #   `docker compose down -v` no longer wipes these directories
+      #     (bind mounts are host paths, untouched by `-v`). Cleanup
+      #     is now `rm -rf .devcontainer/volumes/`.
+      #
+      #   The .devcontainer/volumes/ tree is visible to `git status`
+      #     and host file watchers. Gitignored in the repo .gitignore.
+      #
+      # Why .devcontainer/volumes/ specifically (and not ~/.cache/...
+      # or /tmp/...):
+      #
+      #   - Self-contained: everything devcontainer-related lives under
+      #     .devcontainer/, so contributors can find / understand /
+      #     delete it without leaving the repo.
+      #   - Relative path: works identically across machines without
+      #     environment-variable substitution gymnastics.
+      #   - Project-scoped: no name collision with other devcontainer
+      #     projects (each has its own .devcontainer/volumes/).
+      #
+      # Why we keep three SEPARATE directories instead of one umbrella:
+      #
+      #   The semantic split from the named-volume era still applies:
+      #     - cache/: regenerable in seconds; safe to wipe anytime.
+      #     - uv-data/: holds uv's managed Pythons (~30MB to redownload);
+      #         clearing should be deliberate, not collateral damage.
+      #     - vscode-server/: ~100MB of VS Code extensions; rebuilding
+      #         takes minutes and is annoying mid-session.
+      #   Keeping them separate lets the user `rm -rf` just the cache
+      #   subdirectory when they want a clean cache reset without
+      #   nuking the Python interpreter or their editor extensions.
+      - ./volumes/cache:/home/vscode/.cache
+      - ./volumes/uv-data:/home/vscode/.local/share/uv
+      - ./volumes/vscode-server:/home/vscode/.vscode-server
 
       # ----- Claude Code passthrough from host -----------------------------
       # Decision: bind-mount host's Claude Code state read-write into the
@@ -234,8 +294,11 @@ services:
 # volumes are pruned with `docker volume prune` and harder to identify in
 # `docker volume ls`. Naming them is essentially free and makes lifecycle
 # operations explicit.
+#
+# Note: the dev service's cache / uv-data / vscode-server entries used to
+# live here. They moved to bind mounts under .devcontainer/volumes/ —
+# see the comment above those mounts for the full rationale. Only data
+# services like redis still benefit from named volumes (their UID is
+# stable, they don't ride the host-UID-matching contract).
 volumes:
-  cache:
-  uv-data:
-  vscode-server:
   redis-data:
