@@ -106,6 +106,19 @@ services:
       #   and it has nothing to do with Python tooling. Keeping it
       #   isolated means a "clear all Python caches" never wipes your
       #   editor extensions.
+      #
+      # MAINTENANCE NOTE — each named-volume mount target below MUST also
+      # appear in two other places so that mount-time ownership behaves
+      # correctly on both first creation (image-time chown) and on every
+      # subsequent attach (post-start safety net):
+      #   1. .devcontainer/Dockerfile's pre-create+chown RUN block
+      #      → seeds first-mount ownership of an empty volume
+      #   2. .devcontainer/post-start.sh's VOLUME_MOUNTPOINTS array
+      #      → realigns ownership when a volume is reused across hosts
+      #        with different UIDs (the common breakage path)
+      # Without #1 the FIRST attach on a new host fails; without #2 a
+      # SUBSEQUENT attach on a host with a different UID fails. We need
+      # both. See either file's comments for the full rationale.
       - cache:/home/vscode/.cache
       - uv-data:/home/vscode/.local/share/uv
       - vscode-server:/home/vscode/.vscode-server

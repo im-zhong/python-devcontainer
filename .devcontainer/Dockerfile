@@ -180,7 +180,8 @@ RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
     && usermod -aG docker ${USERNAME}
 
 # -----------------------------------------------------------------------------
-# Decision: pre-create named-volume mountpoints, NOT chown after first attach
+# Decision: pre-create named-volume mountpoints in the image AND realign
+# in post-start.sh — defense in depth.
 # -----------------------------------------------------------------------------
 # The problem: when docker-compose mounts a named volume onto a path that
 # DOESN'T exist in the image, Docker creates the directory itself — and
@@ -192,18 +193,27 @@ RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
 # The same happens to `~/.cache` (uv tries to write wheels) and
 # `~/.local/share/uv` (uv tries to install Python).
 #
-# Considered fixes:
-#   A. Pre-create + chown in the Dockerfile so the first volume mount
-#      INHERITS vscode ownership.  ← chosen
-#   B. `sudo chown` in post-start.sh on every attach.
-#      → works but slow, and forces every contributor to rebuild
-#        sudo permission expectations.
-#   C. Run the container as root.
-#      → defeats the entire UID-matching story above.
+# This image-time pre-create + chown handles the FIRST-MOUNT case:
+# when a named volume is empty, Docker uses the image's mountpoint
+# ownership as the seed for the underlying volume directory.
 #
-# Note: option A only works once per volume. If a volume already exists
-# with bad ownership, you must delete it first (`docker volume rm`).
-# This is documented in README's cache-layout section.
+# But it does NOT handle the "volume already exists with wrong UID"
+# case (e.g. volume populated on a previous host with a different UID,
+# or by a prior crashed attach mid-way). The image's chown is baked
+# into a cached layer and never re-runs. That gap is closed by Job 2
+# in .devcontainer/post-start.sh, which stat-checks each mountpoint
+# on every attach and runs `sudo chown -R` only when misaligned.
+#
+# MAINTENANCE NOTE — the list of mountpoints here MUST match the list
+# in post-start.sh's VOLUME_MOUNTPOINTS array AND the named-volume
+# bind targets in docker-compose.yml. Three places, one truth. When
+# adding a new named volume mounted under /home/vscode/, update all
+# three or the wrong-UID bug will recur for that mount.
+#
+# Why we ALSO chown /home/${USERNAME}/.local (the umbrella, not just
+# .local/share/uv): later RUN steps install per-user tooling under
+# .local/bin and .local/share, and they need a vscode-owned parent
+# even though only one subdirectory is volume-backed.
 RUN mkdir -p \
         /home/${USERNAME}/.vscode-server \
         /home/${USERNAME}/.cache \

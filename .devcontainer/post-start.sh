@@ -95,10 +95,10 @@ fi
 #   - It runs BEFORE the VS Code server tries to write its connection
 #     token (postStartCommand is part of the devcontainer CLI's
 #     attach sequence; it completes before the server is launched).
-#   - When ownership is already correct, chown's syscall short-circuits
-#     at the inode level — no actual writes, no measurable cost.
-#   - We only walk the three subtrees that contain named-volume mounts;
-#     the rest of /home/vscode is untouched.
+#   - When ownership is already correct, the top-level stat() short-circuits
+#     the recursion — no `chown -R` syscall storm on a healthy attach.
+#   - We only walk the named-volume mountpoints; the rest of /home/vscode
+#     is already handled by updateRemoteUserUID's recursive chown.
 #
 # Why we don't chown the bind-mounted dotfiles (~/.claude, ~/.claude.json,
 # ~/.gitconfig):
@@ -107,13 +107,27 @@ fi
 #   ownership inside the container would either fight updateRemoteUserUID
 #   or get overwritten on the host side. initialize.sh handles their
 #   existence; their ownership takes care of itself.
+#
+# MAINTENANCE NOTE — keep VOLUME_MOUNTPOINTS in sync with the named-volume
+# bind targets under /home/vscode/ in docker-compose.yml. Adding a new
+# named-volume mount there (e.g. a pgdata volume mapped under
+# /home/vscode/.local/share/pgdata) without adding the mountpoint here
+# will re-introduce the wrong-UID class of bug for that mount. There is
+# no automatic enumeration because the YAML parser this script could rely
+# on (yq) isn't a guaranteed dependency.
 target_uid=$(id -u vscode)
 target_gid=$(id -g vscode)
-for dir in /home/vscode/.vscode-server /home/vscode/.cache /home/vscode/.local; do
+VOLUME_MOUNTPOINTS=(
+    /home/vscode/.vscode-server   # vscode-server volume — VS Code Server install + workspace state
+    /home/vscode/.cache           # cache volume — XDG cache for all tools (uv wheels, pre-commit, ruff, ty, ...)
+    /home/vscode/.local/share/uv  # uv-data volume — uv's managed Python interpreters + tool installs
+)
+for dir in "${VOLUME_MOUNTPOINTS[@]}"; do
     # Top-level ownership check first — if it already matches, skip the
     # recursive walk entirely. On a healthy attach this is the hot path
     # and finishes in ~1ms; the slow `chown -R` only runs when something
-    # is actually misaligned.
+    # is actually misaligned (volume reused across hosts with different
+    # UIDs, prior failed start left wrong-UID files, etc.).
     if [[ -d "$dir" ]]; then
         cur=$(stat -c '%u:%g' "$dir")
         if [[ "$cur" != "${target_uid}:${target_gid}" ]]; then
