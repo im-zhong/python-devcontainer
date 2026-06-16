@@ -199,13 +199,16 @@ RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
 #
 # But it does NOT handle the "volume already exists with wrong UID"
 # case (e.g. volume populated on a previous host with a different UID,
-# or by a prior crashed attach mid-way). The image's chown is baked
-# into a cached layer and never re-runs. That gap is closed by Job 2
-# in .devcontainer/post-start.sh, which stat-checks each mountpoint
-# on every attach and runs `sudo chown -R` only when misaligned.
+# or by a prior crashed attach that left root-owned files behind).
+# The image's chown is baked into a cached layer and never re-runs.
+# That gap is closed by .devcontainer/entrypoint.sh, which runs as
+# PID 1 BEFORE the devcontainer CLI does any work in the container,
+# and chowns each mountpoint when its top-level ownership is wrong.
+# (We can't use a postStartCommand for this because the CLI's
+# GPG-passthrough and connection-token write happen before postStart.)
 #
 # MAINTENANCE NOTE — the list of mountpoints here MUST match the list
-# in post-start.sh's VOLUME_MOUNTPOINTS array AND the named-volume
+# in entrypoint.sh's VOLUME_MOUNTPOINTS array AND the named-volume
 # bind targets in docker-compose.yml. Three places, one truth. When
 # adding a new named volume mounted under /home/vscode/, update all
 # three or the wrong-UID bug will recur for that mount.
@@ -341,6 +344,40 @@ ENV PATH="/home/${USERNAME}/.local/bin:${PATH}" \
     # to it and the project's pinned interpreter version would be
     # ignored. `only-managed` makes that failure mode loud instead.
     UV_PYTHON_PREFERENCE=only-managed
+
+# -----------------------------------------------------------------------------
+# Decision: ENTRYPOINT wrapper for early-start ownership normalization
+# -----------------------------------------------------------------------------
+# Background:
+#   When a named volume is mounted onto /home/vscode/.vscode-server (or
+#   /home/vscode/.cache, or /home/vscode/.local/share/uv), its contents
+#   may be owned by the WRONG UID — root if dockerd auto-created the
+#   directory, or some legacy UID from a previous host. The devcontainer
+#   CLI's `updateRemoteUserUID` only renumbers files originally owned by
+#   UID 1000, so files owned by anything else stay broken and cause
+#   subsequent attach steps (GPG copy, connection-token write) to fail
+#   with EACCES. No lifecycle hook (postCreate/postStart/postAttach) is
+#   early enough to fix this — they all run AFTER updateRemoteUserUID.
+#
+# Considered fixes:
+#   A. ENTRYPOINT wrapper that chowns before exec'ing CMD.  ← chosen
+#      Runs as PID 1, before the devcontainer CLI does ANY work in the
+#      container. The only hook early enough to catch every failure mode.
+#   B. Switch image to root user + drop privileges in entrypoint via
+#      runuser/gosu.
+#      → bigger architectural change; we already have `USER vscode` with
+#        passwordless sudo, which gives the entrypoint the same privilege
+#        without changing PID 1's identity.
+#   C. Replace named volumes with bind mounts under .devcontainer/volumes/.
+#      → host UID inherited for free, no chown ever needed; but cache
+#        contents leak into repo dir + slower I/O on macOS. Larger
+#        scope than this fix.
+#
+# See entrypoint.sh for the full chown rationale and the maintenance note
+# linking it to docker-compose.yml and the pre-create RUN block above.
+COPY --chown=root:root .devcontainer/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # -----------------------------------------------------------------------------
 # Decision: long-running no-op as default CMD.

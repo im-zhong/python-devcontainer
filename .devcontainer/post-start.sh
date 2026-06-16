@@ -3,21 +3,25 @@
 # Devcontainer post-start hook — runs on EVERY container attach.
 # =============================================================================
 #
-# Four jobs, all idempotent and fast (no-op when nothing has changed):
+# Three jobs, all idempotent and fast (no-op when nothing has changed):
 #   1. Align the in-container `docker` group GID to the bind-mounted host
 #      docker.sock — needed because the GID is host-specific and unknowable
 #      at image-build time.
-#   2. Realign ownership of named-volume-backed home subtrees in case a
-#      stale volume from a previous host/UID combination is being reused.
-#   3. Mark the bind-mounted workspace as a safe directory for git.
-#   4. Sanity-check that the host's SSH agent is reachable (non-fatal).
+#   2. Mark the bind-mounted workspace as a safe directory for git.
+#   3. Sanity-check that the host's SSH agent is reachable (non-fatal).
 #
 # Why these belong in postStart, not postCreate:
-#   All four depend on facts that can change BETWEEN container starts (the
+#   All three depend on facts that can change BETWEEN container starts (the
 #   user could relocate the repo on the host; Docker Desktop could change
-#   the docker GID after an upgrade; a named volume might predate the
-#   current host UID). Doing them once at create time would bake in stale
-#   assumptions.
+#   the docker GID after an upgrade). Doing them once at create time would
+#   bake in stale assumptions.
+#
+# Note: realigning ownership of named-volume mountpoints is NOT done here
+# — that job moved to .devcontainer/entrypoint.sh, which runs as PID 1
+# before the devcontainer CLI does any work in the container. postStart
+# is too late: the CLI's GPG-passthrough copy and connection-token write
+# happen first, and both fail with EACCES on stale-UID volumes before
+# postStart ever runs.
 
 # -e: abort on first error.  -u: undefined-variable use is an error.
 # -o pipefail: catch failures inside pipelines, not just the last command.
@@ -69,75 +73,7 @@ fi
 # After this point, `docker ps` from the vscode user works without sudo.
 
 # -----------------------------------------------------------------------------
-# Job 2 — realign ownership of named-volume-backed home subtrees
-# -----------------------------------------------------------------------------
-# Background:
-#   The Dockerfile pre-creates ~/.vscode-server, ~/.cache and
-#   ~/.local/share/uv as vscode-owned so the FIRST mount of each named
-#   volume inherits the right ownership. That's option A from the
-#   Dockerfile's "pre-create named-volume mountpoints" decision.
-#
-#   But option A has a documented failure mode: if a volume already
-#   exists with bad ownership — e.g. from a previous build on a host
-#   with a different UID, or from a prior failed start that crashed
-#   mid-way — Docker REUSES the existing contents on the next mount.
-#   `chown` in the Dockerfile never re-runs (it's baked into a layer
-#   that's already cached).
-#
-#   updateRemoteUserUID's chown -R fixes /home/vscode for the rename,
-#   but it races with the VS Code server's own writes on first attach.
-#   The observed symptom is:
-#       Permission denied: /home/vscode/.vscode-server/data/Machine/
-#       .connection-token-...
-#   which aborts the attach with a useless error.
-#
-# Why a chown here is the right safety net:
-#   - It runs BEFORE the VS Code server tries to write its connection
-#     token (postStartCommand is part of the devcontainer CLI's
-#     attach sequence; it completes before the server is launched).
-#   - When ownership is already correct, the top-level stat() short-circuits
-#     the recursion — no `chown -R` syscall storm on a healthy attach.
-#   - We only walk the named-volume mountpoints; the rest of /home/vscode
-#     is already handled by updateRemoteUserUID's recursive chown.
-#
-# Why we don't chown the bind-mounted dotfiles (~/.claude, ~/.claude.json,
-# ~/.gitconfig):
-#   Those are bind-mounted from host paths and their ownership reflects
-#   the HOST user, which is intentional (host can edit them too). Forcing
-#   ownership inside the container would either fight updateRemoteUserUID
-#   or get overwritten on the host side. initialize.sh handles their
-#   existence; their ownership takes care of itself.
-#
-# MAINTENANCE NOTE — keep VOLUME_MOUNTPOINTS in sync with the named-volume
-# bind targets under /home/vscode/ in docker-compose.yml. Adding a new
-# named-volume mount there (e.g. a pgdata volume mapped under
-# /home/vscode/.local/share/pgdata) without adding the mountpoint here
-# will re-introduce the wrong-UID class of bug for that mount. There is
-# no automatic enumeration because the YAML parser this script could rely
-# on (yq) isn't a guaranteed dependency.
-target_uid=$(id -u vscode)
-target_gid=$(id -g vscode)
-VOLUME_MOUNTPOINTS=(
-    /home/vscode/.vscode-server   # vscode-server volume — VS Code Server install + workspace state
-    /home/vscode/.cache           # cache volume — XDG cache for all tools (uv wheels, pre-commit, ruff, ty, ...)
-    /home/vscode/.local/share/uv  # uv-data volume — uv's managed Python interpreters + tool installs
-)
-for dir in "${VOLUME_MOUNTPOINTS[@]}"; do
-    # Top-level ownership check first — if it already matches, skip the
-    # recursive walk entirely. On a healthy attach this is the hot path
-    # and finishes in ~1ms; the slow `chown -R` only runs when something
-    # is actually misaligned (volume reused across hosts with different
-    # UIDs, prior failed start left wrong-UID files, etc.).
-    if [[ -d "$dir" ]]; then
-        cur=$(stat -c '%u:%g' "$dir")
-        if [[ "$cur" != "${target_uid}:${target_gid}" ]]; then
-            sudo chown -R "${target_uid}:${target_gid}" "$dir"
-        fi
-    fi
-done
-
-# -----------------------------------------------------------------------------
-# Job 3 — git safe.directory
+# Job 2 — git safe.directory
 # -----------------------------------------------------------------------------
 # Background:
 #   git ≥2.35 refuses to operate on a working tree owned by a UID
@@ -167,7 +103,7 @@ done
 sudo git config --system --add safe.directory /workspaces/python-devcontainer
 
 # -----------------------------------------------------------------------------
-# Job 4 — SSH agent forwarding self-check (non-fatal)
+# Job 3 — SSH agent forwarding self-check (non-fatal)
 # -----------------------------------------------------------------------------
 # devcontainer.json bind-mounts the host's $SSH_AUTH_SOCK to /ssh-agent
 # inside the container so `git push` over SSH works without copying keys

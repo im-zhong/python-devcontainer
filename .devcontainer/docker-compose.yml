@@ -110,12 +110,14 @@ services:
       # MAINTENANCE NOTE — each named-volume mount target below MUST also
       # appear in two other places so that mount-time ownership behaves
       # correctly on both first creation (image-time chown) and on every
-      # subsequent attach (post-start safety net):
+      # subsequent attach (entrypoint safety net):
       #   1. .devcontainer/Dockerfile's pre-create+chown RUN block
       #      → seeds first-mount ownership of an empty volume
-      #   2. .devcontainer/post-start.sh's VOLUME_MOUNTPOINTS array
-      #      → realigns ownership when a volume is reused across hosts
-      #        with different UIDs (the common breakage path)
+      #   2. .devcontainer/entrypoint.sh's VOLUME_MOUNTPOINTS array
+      #      → realigns ownership at PID-1 time when a volume is reused
+      #        across hosts with different UIDs (the common breakage
+      #        path), running BEFORE the devcontainer CLI's GPG copy +
+      #        connection-token write that would otherwise fail with EACCES
       # Without #1 the FIRST attach on a new host fails; without #2 a
       # SUBSEQUENT attach on a host with a different UID fails. We need
       # both. See either file's comments for the full rationale.
