@@ -2,29 +2,36 @@
 
 The dev container needs to push to private Git repos (GitHub, GitLab, …)
 without ever holding your private key. The way this repo achieves that is
-**SSH agent forwarding**:
+**SSH agent forwarding**, done by VS Code's Dev Containers extension:
 
 ```
-┌──────────────── host (WSL2 / Linux / macOS) ────────────────┐
-│                                                             │
-│   ssh-agent (holds the decrypted private key in memory)     │
-│        │                                                    │
-│        │ exposes: $SSH_AUTH_SOCK = /tmp/ssh-XXXX/agent.NNN  │
-│        │                                                    │
-│        ▼                                                    │
-│   bind-mount ──────────────► /ssh-agent (inside container)  │
-│                                                             │
-│                              container processes do         │
-│                              SSH_AUTH_SOCK=/ssh-agent       │
-│                              git push, ssh-add -l, …        │
-│                              (sign requests RPC'd to host)  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────── host (WSL2 / Linux / macOS) ────────────────────┐
+│                                                                 │
+│   ssh-agent (holds the decrypted private key in memory)         │
+│        │                                                        │
+│        │ exposes: $SSH_AUTH_SOCK = /tmp/ssh-XXXX/agent.NNN      │
+│        │                                                        │
+│        │  Dev Containers extension reads this from the host     │
+│        │  shell at attach time and starts a forwarder.          │
+│        ▼                                                        │
+│   forwarder ───► /tmp/vscode-ssh-auth-*.sock (in container)     │
+│                  ^ created INSIDE the container, owned by       │
+│                    `vscode` — no UID mismatch, no chown.        │
+│                                                                 │
+│                  container processes read $SSH_AUTH_SOCK        │
+│                  (auto-exported); git push / ssh-add -l send    │
+│                  sign requests over it back to the host agent.  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 The private key file is **never** copied, never bind-mounted, never written
 into an image layer. The container can only ask the host's agent to sign
 challenges; it cannot read or export the key. See the long design-decision
-comment in `devcontainer.json` for why this beats the alternatives.
+comment in `devcontainer.json` for why this beats the alternatives, and
+why we use VS Code's built-in forwarding rather than a manual
+`$SSH_AUTH_SOCK` bind-mount (the short version: the latter inherits the
+host UID on the socket inode, which on macOS leaves it owned by an
+unmapped user and the container's `vscode` account gets EACCES).
 
 The catch: it depends on the host having an agent running, with your key
 added, in the same shell environment that launches VS Code. This document
@@ -170,7 +177,8 @@ every attach. If it isn't reachable, you'll see:
 When everything is right, that warning is silent. Inside the container:
 
 ```bash
-echo "$SSH_AUTH_SOCK"     # /ssh-agent
+echo "$SSH_AUTH_SOCK"     # /tmp/vscode-ssh-auth-<random>.sock
+ls -l "$SSH_AUTH_SOCK"    # owned by vscode (NOT root, NOT an unmapped UID)
 ssh-add -l                # the same keys ssh-add -l showed on the host
 ssh -T git@github.com     # Hi <username>! ...
 git push                  # works

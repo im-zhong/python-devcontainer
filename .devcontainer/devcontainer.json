@@ -175,27 +175,41 @@
   "forwardPorts": [
     8000, // main service / FastAPI when you start it via `uv run`
     6379 // redis sibling (when started via `dc --profile data up -d`)
-  ],
+  ]
 
   // -------------------------------------------------------------------------
-  // Decision: forward host's SSH agent socket via `mounts:` instead of
-  // copying SSH keys into the container.
+  // Decision: rely on VS Code Dev Containers' BUILT-IN SSH agent
+  // forwarding — no manual mount, no SSH_AUTH_SOCK override.
   // -------------------------------------------------------------------------
   // Why agent forwarding (and not key bind-mount, not key-in-image, not
   // HTTPS+PAT): the container can sign auth challenges so `git push`
   // works, but private key BYTES never enter the container's filesystem.
   // The agent — which holds the decrypted key in memory — runs on the
-  // host; the container only sends "please sign this" RPCs over the
+  // host; the container only sends "please sign this" RPCs over a
   // forwarded Unix socket. This is the OWASP/best-practice answer:
   // smallest attack surface, easiest rotation, transparently supports
   // hardware-backed keys (YubiKey / Secure Enclave / FIDO sk-*).
   //
-  // Prerequisite: the host must have ssh-agent running with a key added,
-  // AND $SSH_AUTH_SOCK must be exported in the shell that launches VS
-  // Code. Full rationale + setup instructions in docs/ssh-agent.md.
-  // post-start.sh emits a diagnostic if the socket isn't reachable.
-  "mounts": ["source=${localEnv:SSH_AUTH_SOCK},target=/ssh-agent,type=bind"],
-  "remoteEnv": {
-    "SSH_AUTH_SOCK": "/ssh-agent"
-  }
+  // Why NOT a manual `mounts:` of $SSH_AUTH_SOCK to /ssh-agent (the
+  // approach we used previously):
+  //   A bind-mounted Unix socket preserves the HOST UID/GID on the
+  //   inode. On macOS the host UID is 501; the container has no UID
+  //   501, so the socket appears owned by an unmapped user and the
+  //   `vscode` account gets EACCES on every `ssh-add -l`. Workarounds
+  //   (chown in postStart, match host UID at build time, socat proxy)
+  //   all add moving parts.
+  //
+  // What VS Code does automatically instead:
+  //   When the host shell that launched VS Code has $SSH_AUTH_SOCK set
+  //   AND a reachable agent, the Dev Containers extension spins up a
+  //   per-container forwarding socket at /tmp/vscode-ssh-auth-*.sock
+  //   that is already owned by `remoteUser` (the vscode account). It
+  //   then exports SSH_AUTH_SOCK to point at it. No mount, no chown,
+  //   no UID gymnastics — the socket is created INSIDE the container
+  //   namespace so ownership is correct by construction.
+  //
+  // Prerequisite: same as before — host must have ssh-agent running
+  // with a key added, AND $SSH_AUTH_SOCK exported in the shell that
+  // launches VS Code. Full setup in docs/ssh-agent.md.
+  // post-start.sh emits a diagnostic if forwarding isn't working.
 }

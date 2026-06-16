@@ -109,16 +109,19 @@ sudo git config --system --add safe.directory /workspaces/python-devcontainer
 # -----------------------------------------------------------------------------
 # Job 3 — SSH agent forwarding self-check (non-fatal)
 # -----------------------------------------------------------------------------
-# devcontainer.json bind-mounts the host's $SSH_AUTH_SOCK to /ssh-agent
-# inside the container so `git push` over SSH works without copying keys
-# in. For that mount to actually be usable, the host must have ssh-agent
-# running AND $SSH_AUTH_SOCK exported in the shell that launched VS Code.
-# When it isn't, `git push` later fails with the unhelpful
+# VS Code Dev Containers' built-in forwarding creates a per-container
+# socket (typically /tmp/vscode-ssh-auth-*.sock) owned by the remote
+# user and points $SSH_AUTH_SOCK at it — BUT only when the host shell
+# that launched VS Code had a reachable agent. When it didn't, the env
+# var is absent and `git push` later fails with the unhelpful
 # "Permission denied (publickey)". We catch the misconfig up front and
 # point at the setup doc — but stay non-fatal because plenty of workflows
 # (HTTPS clones, read-only browsing, CI-style attaches) don't need it.
-SSH_SOCK=/ssh-agent
-if [[ -S "$SSH_SOCK" ]] && SSH_AUTH_SOCK="$SSH_SOCK" ssh-add -l >/dev/null 2>&1; then
+#
+# We can't hard-code a socket path here the way we used to with the
+# manual /ssh-agent bind-mount — instead we trust $SSH_AUTH_SOCK as
+# exported by VS Code and ask the agent itself if it's alive.
+if [[ -n "${SSH_AUTH_SOCK:-}" ]] && [[ -S "${SSH_AUTH_SOCK}" ]] && ssh-add -l >/dev/null 2>&1; then
     : # agent reachable, keys loaded — nothing to say
 else
     cat >&2 <<'EOF'
